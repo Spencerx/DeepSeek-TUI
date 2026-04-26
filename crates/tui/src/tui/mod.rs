@@ -20,6 +20,7 @@ pub mod plan_prompt;
 pub mod scrolling;
 pub mod selection;
 pub mod session_picker;
+pub mod sidebar;
 pub mod streaming;
 pub mod transcript;
 pub mod ui;
