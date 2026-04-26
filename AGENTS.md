@@ -5,11 +5,13 @@ This file provides context for AI assistants working on this project.
 ## Project Type: Rust
 
 ### Commands
-- Build: `cargo build`
+- Build: `cargo build` (default-members include the `deepseek` dispatcher)
 - Test: `cargo test --workspace --all-features`
 - Lint: `cargo clippy --workspace --all-targets --all-features`
 - Format: `cargo fmt --all`
-- Run: `cargo run -p deepseek-tui`
+- Run (canonical): `deepseek` — use the **`deepseek` binary**, not `deepseek-tui`. The dispatcher delegates to the TUI for interactive use and is the supported entry point for every flow (`deepseek`, `deepseek -p "..."`, `deepseek doctor`, `deepseek mcp …`, etc.).
+- Run from source: `cargo run --bin deepseek` (or `cargo run -p deepseek-tui-cli`).
+- Local dev shorthand: after `cargo build --release`, run `./target/release/deepseek`.
 
 ### Build Dependencies
 - **Rust** 1.85+ (for the workspace)
