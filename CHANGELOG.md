@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a plan-mode byte-stability invariant test verifying that the tool
   catalog head remains byte-identical across mode toggles, harvested from
   #2519.
+- Localized all 15 `/queue` command messages across 7 shipped locales,
+  harvested from #2568.
+- Added localized `FanoutCounts` MessageId for i18n of the aggregate worker
+  stats line in fanout cards, harvested from #2566.
+- Added contribution gate CI workflows (PR gate, issue gate, contributor
+  approval) with a dry-run mode, harvested from #2565.
 
 ### Changed
 
@@ -60,8 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Thanks to **@ZhulongNT** (#2045), **@cyq1017** (#2521, #2536, #2537, #2559,
 #2562, #2563, #2564), **@HUQIANTAO** (#2527, #2519, #2503), **@lucaszhu-hue**
-(#2569), **@idling11** (#2573), **@encyc** (#2514), and **@xyuai** (#2560) for
-the work harvested into this release pass. Thanks
+(#2569), **@idling11** (#2573), **@encyc** (#2514), **@xyuai** (#2560),
+**@gordonlu** (#2568, #2566), and **@nightt5879** (#2565) for the work
+harvested into this release pass. Thanks
 also to issue reporters and verification helpers including **@New2Niu**
 (#2561), **@buko** (#2533, #2369), **@wywsoor** (#2494), **@ctxyao** (#2556),
 **@Dr3259** (#2380), **@caiyilian** (#2567), and **@chinaqy110** (#2571) for
