@@ -880,6 +880,7 @@ pub fn tool_run_summary(run: &ToolRun) -> String {
 pub enum ToolStatus {
     Running,
     Success,
+    Hydrated,
     Failed,
 }
 
@@ -1001,8 +1002,16 @@ impl ExploringCell {
             .entries
             .iter()
             .all(|entry| entry.status != ToolStatus::Running);
+        let any_hydrated = self
+            .entries
+            .iter()
+            .any(|entry| entry.status == ToolStatus::Hydrated);
         let status = if all_done {
-            ToolStatus::Success
+            if any_hydrated {
+                ToolStatus::Hydrated
+            } else {
+                ToolStatus::Success
+            }
         } else {
             ToolStatus::Running
         };
@@ -1010,7 +1019,11 @@ impl ExploringCell {
         lines.push(render_tool_header_with_summary(
             "Workspace",
             header_summary.as_deref(),
-            if all_done { "done" } else { "running" },
+            if all_done {
+                tool_status_label(status)
+            } else {
+                "running"
+            },
             status,
             None,
             low_motion,
@@ -1020,6 +1033,7 @@ impl ExploringCell {
             let prefix = match entry.status {
                 ToolStatus::Running => "live",
                 ToolStatus::Success => "done",
+                ToolStatus::Hydrated => "loaded",
                 ToolStatus::Failed => "issue",
             };
             lines.extend(render_compact_kv(
@@ -3161,7 +3175,7 @@ fn status_symbol(started_at: Option<Instant>, status: ToolStatus, low_motion: bo
                 .map_or(0, |d| d % (TOOL_RUNNING_SYMBOLS.len() as u128));
             TOOL_RUNNING_SYMBOLS[usize::try_from(idx).unwrap_or_default()].to_string()
         }
-        ToolStatus::Success => TOOL_DONE_SYMBOL.to_string(),
+        ToolStatus::Success | ToolStatus::Hydrated => TOOL_DONE_SYMBOL.to_string(),
         ToolStatus::Failed => TOOL_FAILED_SYMBOL.to_string(),
     }
 }
@@ -3452,6 +3466,7 @@ fn tool_status_label(status: ToolStatus) -> &'static str {
     match status {
         ToolStatus::Running => "running",
         ToolStatus::Success => "done",
+        ToolStatus::Hydrated => "tool loaded - retry required",
         ToolStatus::Failed => "issue",
     }
 }
