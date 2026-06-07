@@ -683,17 +683,18 @@ fn load_project_context_with_parents_and_home(
     workspace: &Path,
     home_dir: Option<&Path>,
 ) -> ProjectContext {
+    let workspace_canonical = canonicalize_workspace_or_keep(workspace);
     let mut ctx = load_project_context(workspace);
     let parent_search_stop = project_context_parent_search_stop_dir();
 
     // If no context found in workspace, check parent directories
     if !ctx.has_instructions() {
-        let mut current = workspace.parent();
+        let mut current = workspace_canonical.parent();
 
         while let Some(parent) = current {
             if parent_search_stop
                 .as_deref()
-                .is_some_and(|stop| paths_equal_after_canonicalizing(parent, stop))
+                .is_some_and(|stop| parent == stop)
             {
                 break;
             }
@@ -782,7 +783,7 @@ pub(crate) fn project_context_cache_candidate_paths(
     while let Some(dir) = current {
         if parent_search_stop
             .as_deref()
-            .is_some_and(|stop| paths_equal_after_canonicalizing(dir, stop))
+            .is_some_and(|stop| dir == stop)
         {
             break;
         }
@@ -854,10 +855,6 @@ fn canonicalize_workspace_or_keep(workspace: &Path) -> PathBuf {
 
 fn project_context_parent_search_stop_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| canonicalize_workspace_or_keep(&home))
-}
-
-fn paths_equal_after_canonicalizing(left: &Path, right: &Path) -> bool {
-    canonicalize_workspace_or_keep(left) == canonicalize_workspace_or_keep(right)
 }
 
 /// Combine global user-wide preferences with a project-local
