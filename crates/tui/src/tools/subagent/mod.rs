@@ -4222,7 +4222,10 @@ async fn run_subagent(
         record_agent_progress(
             runtime,
             &agent_id,
-            format!("{}: requesting model response", format_step_counter(steps, max_steps)),
+            format!(
+                "{}: requesting model response",
+                format_step_counter(steps, max_steps)
+            ),
         );
 
         while let Ok(input) = input_rx.try_recv() {
@@ -4546,18 +4549,21 @@ async fn run_subagent(
         record_agent_progress(
             runtime,
             &agent_id,
-                format!(
-                    "{}: executing {} tool call(s)",
-                    format_step_counter(steps, max_steps),
-                    tool_uses.len()
-                ),
+            format!(
+                "{}: executing {} tool call(s)",
+                format_step_counter(steps, max_steps),
+                tool_uses.len()
+            ),
         );
         let mut tool_results: Vec<ContentBlock> = Vec::new();
         for (tool_id, tool_name, tool_input) in tool_uses {
             record_agent_progress(
                 runtime,
                 &agent_id,
-                format!("{}: running tool '{tool_name}'", format_step_counter(steps, max_steps)),
+                format!(
+                    "{}: running tool '{tool_name}'",
+                    format_step_counter(steps, max_steps)
+                ),
             );
             if let Some(mb) = runtime.mailbox.as_ref() {
                 let _ = mb.send(MailboxMessage::ToolCallStarted {
@@ -4581,7 +4587,10 @@ async fn run_subagent(
             record_agent_progress(
                 runtime,
                 &agent_id,
-                format!("{}: finished tool '{tool_name}'", format_step_counter(steps, max_steps)),
+                format!(
+                    "{}: finished tool '{tool_name}'",
+                    format_step_counter(steps, max_steps)
+                ),
             );
             if let Some(mb) = runtime.mailbox.as_ref() {
                 let _ = mb.send(MailboxMessage::ToolCallCompleted {
