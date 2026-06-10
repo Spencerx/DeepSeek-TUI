@@ -83,15 +83,16 @@ a download sourced from an impersonating repository or mirror.
 
 ---
 
-## 3. Install via npm (deferred for v0.8.54)
+## 3. Install via npm
 
-The `codewhale` npm wrapper for v0.8.54 is intentionally deferred while the
-release asset publication path is being hardened. Use Cargo, GitHub Releases,
-or CNB for v0.8.54. The notes below describe the npm wrapper behavior once a
-matching npm package is published.
+The `codewhale` npm wrapper is available for v0.8.56 and later.
 
 ```bash
-# Available only after the matching npm package is published.
+npm install -g codewhale
+codewhale
+```
+
+```bash
 npm install -g codewhale
 codewhale
 ```
@@ -519,9 +520,7 @@ cargo build --release
 Both binaries appear in `target\release\codewhale.exe` and
 `target\release\codewhale-tui.exe`.
 
-> For v0.8.54, prefer the GitHub Release installer/archive or the Cargo crates.
-> The npm wrapper path is deferred for this release while release asset
-> publication is hardened.
+> For v0.8.56, install via Cargo, GitHub Releases, CNB, npm, or build from source.
 
 ---
 
