@@ -961,9 +961,7 @@ impl ExecCell {
                     Style::default().fg(palette::TEXT_MUTED),
                     width,
                 ));
-            } else if self.status != ToolStatus::Running
-                && mode == RenderMode::Transcript
-            {
+            } else if self.status != ToolStatus::Running && mode == RenderMode::Transcript {
                 // #3031: Suppress "(no output)" in compact/Live mode;
                 // the success header is enough signal. Transcript still
                 // records it for exports/clipboard/pager.
