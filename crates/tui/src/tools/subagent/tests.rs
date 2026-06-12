@@ -107,6 +107,20 @@ fn headless_worker_record_tracks_lifecycle_without_tui_projection() {
 }
 
 #[test]
+fn subagent_progress_displays_shell_tools_as_bash() {
+    assert_eq!(subagent_progress_tool_display_name("exec_shell"), "Bash");
+    assert_eq!(subagent_progress_tool_display_name("exec_wait"), "Bash");
+    assert_eq!(
+        subagent_progress_tool_display_name("task_shell_wait"),
+        "Bash"
+    );
+    assert_eq!(
+        subagent_progress_tool_display_name("read_file"),
+        "read_file"
+    );
+}
+
+#[test]
 fn headless_worker_records_persist_with_subagent_state() {
     let tmp = tempdir().expect("tempdir");
     let state_path = tmp.path().join("subagents.v1.json");

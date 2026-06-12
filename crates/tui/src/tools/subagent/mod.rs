@@ -5108,11 +5108,12 @@ async fn run_subagent(
         );
         let mut tool_results: Vec<ContentBlock> = Vec::new();
         for (tool_id, tool_name, tool_input) in tool_uses {
+            let tool_display_name = subagent_progress_tool_display_name(&tool_name);
             record_agent_progress(
                 runtime,
                 &agent_id,
                 format!(
-                    "{}: running tool '{tool_name}'",
+                    "{}: running tool '{tool_display_name}'",
                     format_step_counter(steps, max_steps)
                 ),
             );
@@ -5139,7 +5140,7 @@ async fn run_subagent(
                 runtime,
                 &agent_id,
                 format!(
-                    "{}: finished tool '{tool_name}'",
+                    "{}: finished tool '{tool_display_name}'",
                     format_step_counter(steps, max_steps)
                 ),
             );
@@ -6044,6 +6045,19 @@ fn parse_progress_tool_name(message: &str) -> Option<String> {
     let end = rest.find('\'')?;
     let tool = rest[..end].trim();
     (!tool.is_empty()).then(|| tool.to_string())
+}
+
+fn subagent_progress_tool_display_name(name: &str) -> &str {
+    match name {
+        "exec_shell"
+        | "exec_shell_wait"
+        | "exec_shell_interact"
+        | "exec_wait"
+        | "exec_interact"
+        | "task_shell_start"
+        | "task_shell_wait" => "Bash",
+        _ => name,
+    }
 }
 
 fn emit_agent_progress(

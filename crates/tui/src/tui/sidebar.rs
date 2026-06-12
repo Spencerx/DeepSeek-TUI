@@ -859,11 +859,11 @@ fn task_panel_rows(
             .count();
         let done = background_rows.len().saturating_sub(running);
         let label = if running == 0 {
-            format!("Background commands: {done} completed")
+            format!("Bash jobs: {done} completed")
         } else if done == 0 {
-            format!("Background commands: {running} running")
+            format!("Bash jobs: {running} running")
         } else {
-            format!("Background commands: {running} running, {done} completed")
+            format!("Bash jobs: {running} running, {done} completed")
         };
         lines.push(Line::from(Span::styled(
             label,
@@ -985,11 +985,11 @@ fn task_panel_hover_texts(app: &App, max_rows: usize) -> Vec<String> {
             .count();
         let done = background_rows.len().saturating_sub(running);
         let label = if running == 0 {
-            format!("Background commands: {done} completed")
+            format!("Bash jobs: {done} completed")
         } else if done == 0 {
-            format!("Background commands: {running} running")
+            format!("Bash jobs: {running} running")
         } else {
-            format!("Background commands: {running} running, {done} completed")
+            format!("Bash jobs: {running} running, {done} completed")
         };
         texts.push(label);
 
@@ -1136,8 +1136,8 @@ fn background_task_labels(task: &TaskPanelEntry, duration: &str) -> (String, Str
     if let Some(command) = task.prompt_summary.strip_prefix("shell: ") {
         let command = concise_shell_command_label(command, 96);
         return (
-            format!("{} {} {}", task.status, command, duration),
-            format!("{} \u{00B7} command", task.id),
+            format!("Bash {} {} {}", task.status, command, duration),
+            format!("{} \u{00B7} Bash", task.id),
         );
     }
 
@@ -1482,9 +1482,9 @@ fn failure_summary_with_hint(summary: &str) -> String {
 
 fn friendly_generic_tool_name(name: &str) -> &str {
     match name {
-        "task_shell_start" => "start command",
-        "task_shell_wait" => "wait command",
-        "task_shell_write" => "write command",
+        "task_shell_start" => "start Bash",
+        "task_shell_wait" => "wait Bash",
+        "task_shell_write" => "write Bash",
         _ => name,
     }
 }
@@ -1493,7 +1493,7 @@ fn generic_tool_sidebar_summary(generic: &GenericToolCell) -> String {
     match generic.name.as_str() {
         "task_shell_start" => compact_join([
             generic.input_summary.clone().unwrap_or_default(),
-            "background command".to_string(),
+            "background Bash".to_string(),
         ]),
         "task_shell_wait" => compact_join([
             generic.input_summary.clone().unwrap_or_default(),
@@ -1772,7 +1772,7 @@ fn is_ci_poll_row(row: &SidebarToolRow) -> bool {
 }
 
 fn is_shell_wait_poll_row(row: &SidebarToolRow) -> bool {
-    row.status == ToolStatus::Running && row.name == "wait command"
+    row.status == ToolStatus::Running && row.name == "wait Bash"
 }
 
 fn shell_wait_poll_key(row: &SidebarToolRow) -> String {
@@ -3214,7 +3214,7 @@ mod tests {
             "running shell command should not render as both live and background: {text:?}"
         );
         assert!(
-            !text.iter().any(|line| line.contains("Background commands")),
+            !text.iter().any(|line| line.contains("Bash jobs")),
             "duplicate background shell row should be hidden: {text:?}"
         );
     }
@@ -3267,7 +3267,7 @@ mod tests {
             "reasoning row should show live thinking duration: {text:?}"
         );
         assert!(
-            !text.iter().any(|line| line.contains("Background commands")),
+            !text.iter().any(|line| line.contains("Bash jobs")),
             "reasoning must not be counted as a background command: {text:?}"
         );
     }
@@ -3327,7 +3327,7 @@ mod tests {
 
         let header_idx = text
             .iter()
-            .position(|line| line.starts_with("Background commands"))
+            .position(|line| line.starts_with("Bash jobs"))
             .expect("background header row");
         assert!(actions[header_idx].is_none(), "header is not clickable");
 
@@ -3714,7 +3714,7 @@ mod tests {
         let text = lines_to_text(&task_panel_lines(&app, 80, 6));
 
         assert!(
-            text.iter().any(|line| line.contains("[~] wait command")),
+            text.iter().any(|line| line.contains("[~] wait Bash")),
             "shell helper should render as a user-facing activity: {text:?}"
         );
         assert!(
@@ -3748,7 +3748,7 @@ mod tests {
 
         assert_eq!(
             text.iter()
-                .filter(|line| line.contains("[~] wait command"))
+                .filter(|line| line.contains("[~] wait Bash"))
                 .count(),
             1,
             "duplicate waits for the same shell job should collapse: {text:?}"
