@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.59] - 2026-06-12
+
 ### Added
 
 - **Moonshot Kimi K2.7 Code model.** The Moonshot/Kimi provider now defaults to
@@ -107,6 +109,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebrand docs now cover the same upgrade path. Thanks @jazzi and
   @tiangangQiu for the reports, @cyq1017 for the update-path PR, and
   @angus-guo for the README PR.
+- **Short `codew` shim delegation.** The `codew` convenience binary now
+  prefers the sibling `codewhale` dispatcher installed next to it before
+  falling back to `PATH`, preventing fresh local builds or installs from
+  accidentally invoking an older global dispatcher.
 - **Constitution trust wording (#2950/#3008).** The base prompt now explains
   that "begins with an A" means a baseline of trust, not a literal output
   formatting rule. Thanks @cyq1017 for the PR.
@@ -1874,7 +1880,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.58...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.59...HEAD
+[0.8.59]: https://github.com/Hmbown/CodeWhale/compare/v0.8.58...v0.8.59
 [0.8.58]: https://github.com/Hmbown/CodeWhale/compare/v0.8.57...v0.8.58
 [0.8.57]: https://github.com/Hmbown/CodeWhale/compare/v0.8.56...v0.8.57
 [0.8.56]: https://github.com/Hmbown/CodeWhale/compare/v0.8.55...v0.8.56

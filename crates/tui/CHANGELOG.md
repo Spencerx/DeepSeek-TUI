@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.59] - 2026-06-12
+
 ### Added
 
 - **Moonshot Kimi K2.7 Code model.** The Moonshot/Kimi provider now defaults to
@@ -107,6 +109,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebrand docs now cover the same upgrade path. Thanks @jazzi and
   @tiangangQiu for the reports, @cyq1017 for the update-path PR, and
   @angus-guo for the README PR.
+- **Short `codew` shim delegation.** The `codew` convenience binary now
+  prefers the sibling `codewhale` dispatcher installed next to it before
+  falling back to `PATH`, preventing fresh local builds or installs from
+  accidentally invoking an older global dispatcher.
 - **Constitution trust wording (#2950/#3008).** The base prompt now explains
   that "begins with an A" means a baseline of trust, not a literal output
   formatting rule. Thanks @cyq1017 for the PR.
@@ -1345,90 +1351,6 @@ Thanks to new contributors whose PRs landed in this release:
 **@aboimpinto** (#1872),
 and continuing contributors **@reidliu41**, **@cyq1017**, **@idling11**,
 **@h3c-hexin**, **@wdw8276**, **@zlh124**, and **@jeoor**.
-
-## [0.8.45] - 2026-05-25
-
-### Added
-
-- **RLM session objects.** `rlm_open` can now load `session://` refs,
-  exposing the active prompt, history, and session data as symbolic objects
-  inside RLM REPLs (#2047).
-- **Command palette voice input.** The command palette can launch a configured
-  speech-to-text helper and show footer status while transcription runs
-  (#2047).
-- **Moonshot/Kimi provider.** Moonshot/Kimi is now a first-class provider,
-  including API-key auth, model completion, CLI auth, secret-store
-  integration, and optional Kimi CLI credential reuse.
-- **Deterministic whale-species sub-agent names.** Sub-agents now get stable,
-  human-readable whale-species nicknames (e.g. "Beluga", "Orca") while
-  preserving the raw agent ID in the popup (#2035, #2016).
-- **`/balance` command scaffold.** Registered the `/balance` slash command
-  as a placeholder for future provider billing queries (#2035, #2019).
-- **Readable `/restore` snapshot labels.** Snapshot labels now include the
-  originating user prompt so restore listings are easier to identify. Thanks
-  @idling11 (#2111).
-- **Sidebar hover tooltips.** Truncated Work and Tasks sidebar lines now expose
-  their full text on hover. Thanks @idling11 (#2110).
-
-### Changed
-
-- **AGENTS.md is now maintainer-local.** The project instructions file no
-  longer ships as a tracked repo file; it lives in maintainer-local ignored
-  state (#2047).
-
-### Fixed
-
-- **Sub-agent completion handoff compatibility.** Completion handoffs now use a
-  chat-template-safe role and emit before terminal updates, fixing strict
-  OpenAI-compatible/self-hosted backends and preserving transcript ordering.
-  Thanks @h3c-hexin and @cyq1017 (#2057, #2120).
-- **Self-hosted context budgeting.** Sub-500K self-hosted model windows now keep
-  a usable input budget instead of disabling preflight compaction after output
-  reservation underflow. Thanks @h3c-hexin (#2060).
-- **Goal prompts start actionable.** Goal-start prompts now open in an
-  actionable state instead of requiring an extra nudge. Thanks @cyq1017
-  (#2097).
-- **Composer session title display.** The composer chrome shows the current
-  session title again and avoids grayscale luma overflow in debug builds.
-  Thanks @wdw8276 (#2108).
-- **Approval prompts use a one-step confirmation flow.** Enter now commits the
-  selected approval option directly, destructive warnings remain visible, and
-  abort cancels the active turn instead of only denying the current tool call.
-  Thanks @reidliu41 (#2143).
-- **Model picker selection survives Esc.** Dismissing the model picker with Esc
-  no longer loses the highlighted selection. Thanks @reidliu41 (#2056).
-- **Moonshot/Kimi sessions launch from the dispatcher.** The `codewhale`
-  wrapper now includes Moonshot/Kimi in the TUI provider allowlist, so
-  `codewhale --provider moonshot --model kimi-k2.6` reaches the TUI instead of
-  stopping after config resolution.
-- **Slash recovery no longer restores command tails in the composer.**
-  Resuming a session or recovering from a crash no longer leaves stale
-  slash-command text (e.g. `/sessions`) in the composer input (#2047, #2032).
-- **Remembered tool approvals now update the live active turn.**
-  When the "remember" checkbox is set on an approval dialog, the active
-  turn's auto-approve flag flips immediately instead of waiting for the
-  next turn. Thanks @gaord (#2047, #2041).
-- **YAML block scalars in SKILL.md frontmatter.** Multi-line descriptions
-  using `>` or `|` indicators are now parsed correctly — folded block
-  scalars join non-empty lines with spaces, literal scalars preserve
-  newlines, and all three chomping modes (strip/clip/keep) are supported.
-  Thanks @zlh124 (#1908, #1907).
-- **User messages highlighted in the transcript.** User-authored messages
-  now render with a full-row background in the live TUI transcript, making
-  it easier to scan prior turns. Assistant and system messages are
-  unaffected. Thanks @reidliu41 (#1995, #1672).
-- **Cancellable `list_dir` and `file_search`.** Long directory walks and
-  file searches now respond to user cancel/stop requests with a 30-second
-  fallback timeout, preventing the TUI from hanging on deep or slow
-  filesystems (#2035).
-
-### Community
-
-- **README contributor acknowledgements resynced.** The Thanks list now
-  includes the latest contributor rows for @donglovejava, @encyc,
-  @saieswar237, @sximelon, @nanookclaw, @Sskift, @xin1104, @mrluanma,
-  @Lellansin, and @zhuangbiaowei, while preserving the existing @jeoor
-  acknowledgement in the consolidated list.
 
 ---
 
