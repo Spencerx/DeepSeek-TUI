@@ -7,6 +7,7 @@
 //! fall-through behaviour.
 
 mod groups;
+mod plugins;
 pub mod traits;
 pub mod user_commands;
 

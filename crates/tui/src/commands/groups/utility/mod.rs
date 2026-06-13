@@ -22,6 +22,7 @@ impl CommandGroup for UtilityCommands {
             Box::new(FunctionCommand::new(&JOBS_INFO, run_jobs)),
             Box::new(FunctionCommand::new(&MCP_INFO, run_mcp)),
             Box::new(FunctionCommand::new(&NETWORK_INFO, run_network)),
+            Box::new(FunctionCommand::new(&PLUGINS_INFO, run_plugins)),
         ]
     }
 }
@@ -56,6 +57,12 @@ static NETWORK_INFO: CommandInfo = CommandInfo {
     usage: "/network [list|allow <host>|deny <host>|remove <host>|default <allow|deny|prompt>]",
     description_id: MessageId::CmdNetworkDescription,
 };
+static PLUGINS_INFO: CommandInfo = CommandInfo {
+    name: "plugins",
+    aliases: &["plugin"],
+    usage: "/plugins [name]",
+    description_id: MessageId::CmdPluginDescription,
+};
 
 fn run_registered(app: &mut App, name: &str, arg: Option<&str>) -> CommandResult {
     dispatch(app, name, arg).expect("registered utility command should dispatch")
@@ -76,6 +83,9 @@ fn run_mcp(app: &mut App, arg: Option<&str>) -> CommandResult {
 fn run_network(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "network", arg)
 }
+fn run_plugins(app: &mut App, arg: Option<&str>) -> CommandResult {
+    run_registered(app, "plugins", arg)
+}
 
 pub(in crate::commands) fn dispatch(
     app: &mut App,
@@ -88,6 +98,7 @@ pub(in crate::commands) fn dispatch(
         "jobs" | "job" | "zuoye" => jobs::jobs(app, arg),
         "mcp" => mcp::mcp(app, arg),
         "network" => network::network(app, arg),
+        "plugins" | "plugin" => crate::commands::plugins::plugins(app, arg),
         _ => return None,
     };
     Some(result)
