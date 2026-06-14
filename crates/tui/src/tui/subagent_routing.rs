@@ -334,6 +334,8 @@ pub(super) fn task_summary_to_panel_entry(summary: TaskSummary) -> TaskPanelEntr
         prompt_summary: summary.prompt_summary,
         duration_ms: summary.duration_ms,
         kind: TaskPanelEntryKind::Background,
+        stale: false,
+        elapsed_since_output_ms: None,
     }
 }
 

@@ -1898,6 +1898,8 @@ pub struct TaskPanelEntry {
     pub prompt_summary: String,
     pub duration_ms: Option<u64>,
     pub kind: TaskPanelEntryKind,
+    pub stale: bool,
+    pub elapsed_since_output_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

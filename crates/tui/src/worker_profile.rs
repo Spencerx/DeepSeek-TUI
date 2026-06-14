@@ -75,6 +75,18 @@ pub enum ShellPolicy {
 }
 
 impl ShellPolicy {
+    /// Convert the legacy top-level shell opt-in into the typed shell policy.
+    #[must_use]
+    pub const fn from_legacy_allow_shell(allow_shell: bool) -> Self {
+        if allow_shell { Self::Full } else { Self::None }
+    }
+
+    /// Whether any shell tools should be exposed under this policy.
+    #[must_use]
+    pub const fn allows_shell(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
     /// The more restrictive (safer) of two policies. A child can never exceed
     /// its parent's shell policy.
     #[must_use]

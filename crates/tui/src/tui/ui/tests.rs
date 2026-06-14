@@ -2104,6 +2104,7 @@ fn shell_live_output_update_matches_exact_task_id_only() {
             stderr_len: 12,
             stdin_available: false,
             stale: false,
+            elapsed_since_output_ms: None,
             linked_task_id: None,
         },
     );
@@ -2152,6 +2153,7 @@ fn shell_live_output_update_skips_finalized_exec_cell() {
             stderr_len: 0,
             stdin_available: false,
             stale: false,
+            elapsed_since_output_ms: None,
             linked_task_id: None,
         },
     );
@@ -3263,6 +3265,77 @@ fn turn_liveness_does_not_abort_running_tool() {
     assert!(app.is_loading);
     assert!(app.active_cell.is_some());
     assert!(app.status_toasts.is_empty());
+}
+
+#[test]
+fn turn_liveness_does_not_abort_running_tool_with_recent_heartbeat() {
+    let mut app = create_test_app();
+    let now = Instant::now();
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    app.turn_started_at = Some(now - TOOL_HANG_WATCHDOG_TIMEOUT - Duration::from_secs(30));
+    app.turn_last_activity_at = Some(now - Duration::from_secs(10));
+    let mut active = ActiveCell::new();
+    active.push_tool(
+        "tool-1",
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: "exec_shell".to_string(),
+            status: ToolStatus::Running,
+            input_summary: Some("command: cargo test".to_string()),
+            output: None,
+            prompts: None,
+            spillover_path: None,
+            output_summary: None,
+            is_diff: false,
+        })),
+    );
+    app.active_cell = Some(active);
+
+    let recovered = reconcile_turn_liveness(&mut app, now, false);
+
+    assert!(!recovered);
+    assert!(app.is_loading);
+    assert!(app.active_cell.is_some());
+    assert!(app.status_toasts.is_empty());
+}
+
+#[test]
+fn turn_liveness_recovers_running_tool_without_heartbeat() {
+    let mut app = create_test_app();
+    let now = Instant::now();
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    app.runtime_turn_id = Some("stale-tool-turn".to_string());
+    app.turn_started_at = Some(now - TOOL_HANG_WATCHDOG_TIMEOUT - Duration::from_secs(1));
+    app.turn_last_activity_at = app.turn_started_at;
+    app.user_scrolled_during_stream = true;
+    let mut active = ActiveCell::new();
+    active.push_tool(
+        "tool-1",
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: "exec_shell".to_string(),
+            status: ToolStatus::Running,
+            input_summary: Some("command: cargo test".to_string()),
+            output: None,
+            prompts: None,
+            spillover_path: None,
+            output_summary: None,
+            is_diff: false,
+        })),
+    );
+    app.active_cell = Some(active);
+
+    let recovered = reconcile_turn_liveness(&mut app, now, false);
+
+    assert!(recovered);
+    assert!(!app.is_loading);
+    assert!(app.turn_started_at.is_none());
+    assert!(app.runtime_turn_status.is_none());
+    assert!(app.runtime_turn_id.is_none());
+    assert!(!app.user_scrolled_during_stream);
+    let toast = app.status_toasts.back().expect("tool hang toast");
+    assert_eq!(toast.level, StatusToastLevel::Error);
+    assert!(toast.text.contains("Tool stalled with no progress"));
 }
 
 #[test]
@@ -10103,6 +10176,8 @@ mod work_sidebar_projection_tests {
             prompt_summary: "echo hello".to_string(),
             duration_ms: Some(100),
             kind: crate::tui::app::TaskPanelEntryKind::Background,
+            stale: false,
+            elapsed_since_output_ms: None,
         };
         assert_eq!(entry.status, "completed");
         assert_ne!(entry.status, "running");

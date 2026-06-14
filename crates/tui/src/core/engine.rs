@@ -2382,6 +2382,7 @@ impl Engine {
             self.session.messages.clone().into(),
         ))
         .with_cancel_token(self.cancel_token.clone())
+        .with_shell_policy(shell_policy_for_mode(mode, self.session.allow_shell))
         .with_trusted_external_paths(trusted_external_paths);
 
         // Hand the user-memory path to tools so the model-callable
@@ -3015,7 +3016,7 @@ use self::tool_catalog::{
     preflight_requested_deferred_tool, should_default_defer_tool,
 };
 use self::tool_execution::emit_tool_audit;
-use self::tool_setup::sandbox_policy_for_mode;
+use self::tool_setup::{sandbox_policy_for_mode, shell_policy_for_mode};
 use crate::tools::js_execution::execute_js_execution_tool;
 
 #[cfg(test)]

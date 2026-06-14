@@ -168,6 +168,9 @@ const DISPATCH_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(30);
 /// engine panic).  Matched to [`DEFAULT_STREAM_IDLE_TIMEOUT`] so legitimate
 /// long-running tool chains are not interrupted prematurely.
 const TURN_STALL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(300);
+/// Running tools can legitimately exceed the silent-turn timeout, but a tool
+/// with no progress heartbeat or output beyond this ceiling is treated as hung.
+const TOOL_HANG_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(900);
 // Forced repaint cadence while a turn is live (model loading, compacting,
 // sub-agents running). Drives the footer water-spout animation as well as
 // the per-tool spinner pulse — keep this fast enough that the spout reads as
@@ -1116,6 +1119,8 @@ async fn refresh_active_task_panel(app: &mut App, task_manager: &SharedTaskManag
                 prompt_summary: format!("shell: {}", job.command),
                 duration_ms: Some(job.elapsed_ms),
                 kind: TaskPanelEntryKind::Background,
+                stale: job.stale,
+                elapsed_since_output_ms: job.elapsed_since_output_ms,
             });
         }
     }
@@ -1227,6 +1232,8 @@ fn active_reasoning_task_entries(app: &App) -> Vec<TaskPanelEntry> {
                 prompt_summary: "model reasoning".to_string(),
                 duration_ms,
                 kind: TaskPanelEntryKind::ModelReasoning,
+                stale: false,
+                elapsed_since_output_ms: None,
             }),
             _ => None,
         })
@@ -1266,6 +1273,8 @@ fn active_rlm_task_entries(app: &App) -> Vec<TaskPanelEntry> {
                 prompt_summary: format!("RLM: {summary}"),
                 duration_ms,
                 kind: TaskPanelEntryKind::Background,
+                stale: false,
+                elapsed_since_output_ms: None,
             })
         })
         .collect()
@@ -4921,32 +4930,57 @@ fn reconcile_turn_liveness(app: &mut App, now: Instant, has_running_agents: bool
                 now.saturating_duration_since(last_activity) > TURN_STALL_WATCHDOG_TIMEOUT
             })
     {
-        // Finalize in-flight thinking / assistant / tool cells so the
-        // transcript doesn't show permanent spinners after recovery.
-        streaming_thinking::finalize_current(app);
-        app.finalize_streaming_assistant_as_interrupted();
-        app.finalize_active_cell_as_interrupted();
-        app.streaming_state.reset();
-        app.streaming_message_index = None;
-        app.streaming_thinking_active_entry = None;
-
-        app.is_loading = false;
-        app.turn_started_at = None;
-        app.turn_last_activity_at = None;
-        app.runtime_turn_status = None;
-        app.runtime_turn_id = None;
-        app.dispatch_started_at = None;
-        // Per-turn scroll lock — clear so the next turn auto-scrolls.
-        app.user_scrolled_during_stream = false;
-        app.push_status_toast(
+        recover_stalled_runtime_turn(
+            app,
             "Turn stalled — no completion signal received. Please try again.",
             StatusToastLevel::Error,
-            None,
+        );
+        return true;
+    }
+
+    if app.is_loading
+        && matches!(app.runtime_turn_status.as_deref(), Some("in_progress"))
+        && !has_running_agents
+        && !app.is_compacting
+        && !app.is_purging
+        && active_turn_has_running_tool(app)
+        && app
+            .turn_last_activity_at
+            .or(app.turn_started_at)
+            .is_some_and(|last_activity| {
+                now.saturating_duration_since(last_activity) > TOOL_HANG_WATCHDOG_TIMEOUT
+            })
+    {
+        recover_stalled_runtime_turn(
+            app,
+            "Tool stalled with no progress for 15m — recovered; the command may still be running in the background. Use exec_shell_cancel or retry.",
+            StatusToastLevel::Error,
         );
         return true;
     }
 
     false
+}
+
+fn recover_stalled_runtime_turn(app: &mut App, message: &str, level: StatusToastLevel) {
+    // Finalize in-flight thinking / assistant / tool cells so the
+    // transcript doesn't show permanent spinners after recovery.
+    streaming_thinking::finalize_current(app);
+    app.finalize_streaming_assistant_as_interrupted();
+    app.finalize_active_cell_as_interrupted();
+    app.streaming_state.reset();
+    app.streaming_message_index = None;
+    app.streaming_thinking_active_entry = None;
+
+    app.is_loading = false;
+    app.turn_started_at = None;
+    app.turn_last_activity_at = None;
+    app.runtime_turn_status = None;
+    app.runtime_turn_id = None;
+    app.dispatch_started_at = None;
+    // Per-turn scroll lock — clear so the next turn auto-scrolls.
+    app.user_scrolled_during_stream = false;
+    app.push_status_toast(message, level, None);
 }
 
 /// #3033: gate progress-driven repaints to at most one per 100ms.

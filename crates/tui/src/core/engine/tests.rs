@@ -1763,6 +1763,39 @@ fn agent_mode_can_build_auto_approved_tool_context() {
 }
 
 #[test]
+fn build_tool_context_uses_typed_shell_policy_per_mode() {
+    let mut config = EngineConfig {
+        allow_shell: true,
+        ..EngineConfig::default()
+    };
+    let (engine, _handle) = Engine::new(config.clone(), &Config::default());
+
+    assert_eq!(
+        engine.build_tool_context(AppMode::Plan, false).shell_policy,
+        crate::worker_profile::ShellPolicy::ReadOnly
+    );
+    assert_eq!(
+        engine
+            .build_tool_context(AppMode::Agent, false)
+            .shell_policy,
+        crate::worker_profile::ShellPolicy::Full
+    );
+    assert_eq!(
+        engine.build_tool_context(AppMode::Yolo, false).shell_policy,
+        crate::worker_profile::ShellPolicy::Full
+    );
+
+    config.allow_shell = false;
+    let (engine, _handle) = Engine::new(config, &Config::default());
+    assert_eq!(
+        engine
+            .build_tool_context(AppMode::Agent, false)
+            .shell_policy,
+        crate::worker_profile::ShellPolicy::None
+    );
+}
+
+#[test]
 fn agent_and_yolo_modes_elevate_shell_sandbox_to_allow_network() {
     // Regression for #273: the seatbelt-default policy denies all outbound
     // network (including DNS), which broke `curl`, `yt-dlp`, package managers,

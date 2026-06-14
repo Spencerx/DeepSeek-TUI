@@ -919,13 +919,17 @@ fn task_panel_rows(
 
         let max_items = max_rows.saturating_sub(lines.len());
         for task in background_rows.iter().take(max_items) {
-            let color = match task.status.as_str() {
-                "queued" => theme.text_muted,
-                "running" => theme.warning,
-                "completed" => theme.success,
-                "failed" => theme.error_fg,
-                "canceled" => theme.text_dim,
-                _ => theme.text_muted,
+            let color = if task.stale && task.status == "running" {
+                theme.warning
+            } else {
+                match task.status.as_str() {
+                    "queued" => theme.text_muted,
+                    "running" => theme.warning,
+                    "completed" => theme.success,
+                    "failed" => theme.error_fg,
+                    "canceled" => theme.text_dim,
+                    _ => theme.text_muted,
+                }
             };
             let duration = task
                 .duration_ms
@@ -948,18 +952,38 @@ fn task_panel_rows(
             actions.push(Some(detail_action));
         }
 
-        if lines.len() < max_rows
-            && background_rows
+        if lines.len() < max_rows {
+            let stale_running_shells = background_rows
                 .iter()
-                .any(|task| task.id.starts_with("shell_") && task.status == "running")
-        {
-            lines.push(Line::from(Span::styled(
-                truncate_line_to_width("Ctrl+K -> /jobs cancel-all", content_width.max(1)),
-                Style::default()
-                    .fg(theme.text_muted)
-                    .add_modifier(ratatui::style::Modifier::ITALIC),
-            )));
-            actions.push(Some("/jobs cancel-all".to_string()));
+                .filter(|task| {
+                    task.id.starts_with("shell_") && task.status == "running" && task.stale
+                })
+                .collect::<Vec<_>>();
+            let any_running_shell = background_rows
+                .iter()
+                .any(|task| task.id.starts_with("shell_") && task.status == "running");
+            let hint_action = if stale_running_shells.len() == 1 {
+                Some((
+                    "Ctrl+K -> cancel stale job".to_string(),
+                    format!("/jobs cancel {}", stale_running_shells[0].id),
+                ))
+            } else if any_running_shell {
+                Some((
+                    "Ctrl+K -> /jobs cancel-all".to_string(),
+                    "/jobs cancel-all".to_string(),
+                ))
+            } else {
+                None
+            };
+            if let Some((hint, action)) = hint_action {
+                lines.push(Line::from(Span::styled(
+                    truncate_line_to_width(&hint, content_width.max(1)),
+                    Style::default()
+                        .fg(theme.text_muted)
+                        .add_modifier(ratatui::style::Modifier::ITALIC),
+                )));
+                actions.push(Some(action));
+            }
         }
     }
 
@@ -1053,12 +1077,21 @@ fn task_panel_hover_texts(app: &App, max_rows: usize) -> Vec<String> {
             texts.push(format!("  {detail}"));
         }
 
-        if texts.len() < max_rows
-            && background_rows
+        if texts.len() < max_rows {
+            let stale_running_shells = background_rows
                 .iter()
-                .any(|task| task.id.starts_with("shell_") && task.status == "running")
-        {
-            texts.push("Ctrl+K -> /jobs cancel-all".to_string());
+                .filter(|task| {
+                    task.id.starts_with("shell_") && task.status == "running" && task.stale
+                })
+                .count();
+            let any_running_shell = background_rows
+                .iter()
+                .any(|task| task.id.starts_with("shell_") && task.status == "running");
+            if stale_running_shells == 1 {
+                texts.push("Ctrl+K -> cancel stale job".to_string());
+            } else if any_running_shell {
+                texts.push("Ctrl+K -> /jobs cancel-all".to_string());
+            }
         }
     }
 
@@ -1179,11 +1212,20 @@ fn push_reasoning_row_hover_texts(
 }
 
 fn background_task_labels(task: &TaskPanelEntry, duration: &str) -> (String, String) {
+    let stale_label = stale_no_output_label(task);
+    let status = stale_label
+        .as_ref()
+        .map(|label| format!("{} ({label})", task.status))
+        .unwrap_or_else(|| task.status.clone());
+
     if let Some(command) = task.prompt_summary.strip_prefix("shell: ") {
         let command = concise_shell_command_label(command, 96);
         return (
-            format!("Bash {} {} {}", task.status, command, duration),
-            format!("{} \u{00B7} Bash", task.id),
+            format!("Bash {status} {command} {duration}"),
+            compact_join([
+                format!("{} \u{00B7} Bash", task.id),
+                stale_label.unwrap_or_default(),
+            ]),
         );
     }
 
@@ -1191,11 +1233,21 @@ fn background_task_labels(task: &TaskPanelEntry, duration: &str) -> (String, Str
         format!(
             "{} {} {}",
             truncate_line_to_width(&task.id, 10),
-            task.status,
+            status,
             duration
         ),
-        task.prompt_summary.clone(),
+        compact_join([task.prompt_summary.clone(), stale_label.unwrap_or_default()]),
     )
+}
+
+fn stale_no_output_label(task: &TaskPanelEntry) -> Option<String> {
+    if !(task.stale && task.status == "running") {
+        return None;
+    }
+    task.elapsed_since_output_ms
+        .map(format_duration_ms)
+        .map(|duration| format!("stale, no output {duration}"))
+        .or_else(|| Some("stale, no output".to_string()))
 }
 
 fn active_tool_rows(app: &App) -> Vec<SidebarToolRow> {
@@ -1818,7 +1870,8 @@ fn is_ci_poll_row(row: &SidebarToolRow) -> bool {
 }
 
 fn is_shell_wait_poll_row(row: &SidebarToolRow) -> bool {
-    row.status == ToolStatus::Running && row.name == "wait Bash"
+    row.status == ToolStatus::Running
+        && matches!(row.name.as_str(), "wait Bash" | "exec_shell_wait")
 }
 
 fn shell_wait_poll_key(row: &SidebarToolRow) -> String {
@@ -1835,7 +1888,7 @@ fn shell_wait_poll_key(row: &SidebarToolRow) -> String {
         }
     }
 
-    normalize_activity_text(&row.summary)
+    normalize_activity_text(&row.name)
 }
 
 fn normalize_activity_text(text: &str) -> String {
@@ -3389,6 +3442,8 @@ mod tests {
             prompt_summary: "shell: cargo test --workspace".to_string(),
             duration_ms: Some(12_000),
             kind: TaskPanelEntryKind::Background,
+            stale: false,
+            elapsed_since_output_ms: None,
         });
 
         let text = lines_to_text(&task_panel_lines(&app, 80, 10));
@@ -3421,6 +3476,8 @@ mod tests {
                 .to_string(),
             duration_ms: Some(178_000),
             kind: TaskPanelEntryKind::Background,
+            stale: false,
+            elapsed_since_output_ms: None,
         });
 
         let text = lines_to_text(&task_panel_lines(&app, 96, 8));
@@ -3445,6 +3502,8 @@ mod tests {
             prompt_summary: "model reasoning".to_string(),
             duration_ms: Some(4_200),
             kind: TaskPanelEntryKind::ModelReasoning,
+            stale: false,
+            elapsed_since_output_ms: None,
         });
 
         let text = lines_to_text(&task_panel_lines(&app, 80, 8));
@@ -3473,6 +3532,8 @@ mod tests {
             prompt_summary: "shell: cargo build".to_string(),
             duration_ms: Some(1_000),
             kind: TaskPanelEntryKind::Background,
+            stale: false,
+            elapsed_since_output_ms: None,
         });
 
         let (lines, actions) = task_panel_rows(&app, 80, 12);
@@ -3496,6 +3557,46 @@ mod tests {
     }
 
     #[test]
+    fn stale_background_job_row_shows_no_output_warning_and_cancel_hint() {
+        let mut app = create_test_app();
+        app.task_panel.push(TaskPanelEntry {
+            id: "shell_stale".to_string(),
+            status: "running".to_string(),
+            prompt_summary: "shell: sleep 300".to_string(),
+            duration_ms: Some(61_000),
+            kind: TaskPanelEntryKind::Background,
+            stale: true,
+            elapsed_since_output_ms: Some(61_000),
+        });
+
+        let (lines, actions) = task_panel_rows(&app, 80, 12);
+        let text = lines_to_text(&lines);
+
+        assert!(
+            text.iter()
+                .any(|line| line.contains("stale") && line.contains("no output")),
+            "stale shell job should call out no-output state: {text:?}"
+        );
+        let hint_idx = text
+            .iter()
+            .position(|line| line.contains("cancel stale job"))
+            .expect("stale cancel hint");
+        assert_eq!(
+            actions[hint_idx].as_deref(),
+            Some("/jobs cancel shell_stale")
+        );
+        let detail_idx = text
+            .iter()
+            .position(|line| line.contains("shell_stale"))
+            .expect("stale job detail row");
+        assert_eq!(
+            actions[detail_idx].as_deref(),
+            Some("/jobs cancel shell_stale"),
+            "stale job detail row should still cancel the specific job"
+        );
+    }
+
+    #[test]
     fn task_panel_actions_route_each_job_to_its_own_id() {
         let mut app = create_test_app();
         app.task_panel.push(TaskPanelEntry {
@@ -3504,6 +3605,8 @@ mod tests {
             prompt_summary: "shell: cargo test --workspace".to_string(),
             duration_ms: Some(2_000),
             kind: TaskPanelEntryKind::Background,
+            stale: false,
+            elapsed_since_output_ms: None,
         });
         app.task_panel.push(TaskPanelEntry {
             id: "task_bbb".to_string(),
@@ -3511,6 +3614,8 @@ mod tests {
             prompt_summary: "summarize the release notes".to_string(),
             duration_ms: Some(3_000),
             kind: TaskPanelEntryKind::Background,
+            stale: false,
+            elapsed_since_output_ms: None,
         });
 
         let (lines, actions) = task_panel_rows(&app, 96, 16);
@@ -3569,6 +3674,8 @@ mod tests {
             prompt_summary: "shell: cargo fmt".to_string(),
             duration_ms: Some(500),
             kind: TaskPanelEntryKind::Background,
+            stale: false,
+            elapsed_since_output_ms: None,
         });
 
         let (lines, actions) = task_panel_rows(&app, 80, 12);
@@ -3613,6 +3720,8 @@ mod tests {
             prompt_summary: "investigate flaky test".to_string(),
             duration_ms: Some(9_000),
             kind: TaskPanelEntryKind::Background,
+            stale: false,
+            elapsed_since_output_ms: None,
         });
 
         let (lines, actions) = task_panel_rows(&app, 96, 16);
@@ -3948,6 +4057,45 @@ mod tests {
         assert!(
             text.iter().any(|line| line.contains("2 waits collapsed")),
             "collapsed row should explain why only one wait is visible: {text:?}"
+        );
+    }
+
+    #[test]
+    fn tasks_panel_collapses_repeated_shell_waits_without_task_marker() {
+        let mut app = create_test_app();
+        let mut active = ActiveCell::new();
+        for (id, summary) in [
+            ("shell-wait-1", "Background task running (no new output)."),
+            ("shell-wait-2", "Still running after 10s."),
+        ] {
+            active.push_tool(
+                id,
+                HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+                    name: "task_shell_wait".to_string(),
+                    status: ToolStatus::Running,
+                    input_summary: None,
+                    output: None,
+                    prompts: None,
+                    spillover_path: None,
+                    output_summary: Some(summary.to_string()),
+                    is_diff: false,
+                })),
+            );
+        }
+        app.active_cell = Some(active);
+
+        let text = lines_to_text(&task_panel_lines(&app, 100, 8));
+
+        assert_eq!(
+            text.iter()
+                .filter(|line| line.contains("[~] wait Bash"))
+                .count(),
+            1,
+            "same wait helper without task markers should still collapse: {text:?}"
+        );
+        assert!(
+            text.iter().any(|line| line.contains("2 waits collapsed")),
+            "collapsed no-marker row should show the wait count: {text:?}"
         );
     }
 

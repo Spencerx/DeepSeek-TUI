@@ -171,6 +171,7 @@ mod tests {
             stderr_len: 8,
             stdin_available: false,
             stale: true,
+            elapsed_since_output_ms: None,
             linked_task_id: Some("task_1".to_string()),
         }];
         let formatted = format_shell_job_list(&jobs);

@@ -1278,6 +1278,7 @@ pub struct McpConnection {
     request_id: AtomicU64,
     state: ConnectionState,
     config: McpServerConfig,
+    read_timeout_secs: u64,
     cancel_token: tokio_util::sync::CancellationToken,
 }
 
@@ -1294,6 +1295,7 @@ impl McpConnection {
         network_policy: Option<&NetworkPolicyDecider>,
     ) -> Result<Self> {
         let connect_timeout_secs = config.effective_connect_timeout(global_timeouts);
+        let read_timeout_secs = config.effective_read_timeout(global_timeouts);
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
         let transport: Box<dyn McpTransport> = if let Some(url) = &config.url {
@@ -1456,6 +1458,7 @@ impl McpConnection {
             request_id: AtomicU64::new(1),
             state: ConnectionState::Connecting,
             config,
+            read_timeout_secs,
             cancel_token,
         };
 
@@ -1861,16 +1864,37 @@ impl McpConnection {
 
     async fn recv(&mut self, expected_id: String) -> Result<serde_json::Value> {
         loop {
-            let bytes = self.transport.recv().await.inspect_err(|_e| {
-                self.state = ConnectionState::Disconnected;
-            })?;
-            let value: serde_json::Value = serde_json::from_slice(&bytes).with_context(|| {
-                format!(
-                    "Invalid MCP JSON-RPC message from server '{}': {}",
-                    self.name,
-                    invalid_json_preview(&bytes)
-                )
-            })?;
+            let bytes = match tokio::time::timeout(
+                Duration::from_secs(self.read_timeout_secs),
+                self.transport.recv(),
+            )
+            .await
+            {
+                Ok(result) => result.inspect_err(|_e| {
+                    self.state = ConnectionState::Disconnected;
+                })?,
+                Err(_) => {
+                    self.state = ConnectionState::Disconnected;
+                    anyhow::bail!(
+                        "Timed out waiting for MCP JSON-RPC response from server '{}' after {}s",
+                        self.name,
+                        self.read_timeout_secs
+                    );
+                }
+            };
+            let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+                Ok(value) => value,
+                Err(err) => {
+                    self.state = ConnectionState::Disconnected;
+                    return Err(err).with_context(|| {
+                        format!(
+                            "Invalid MCP JSON-RPC message from server '{}': {}",
+                            self.name,
+                            invalid_json_preview(&bytes)
+                        )
+                    });
+                }
+            };
 
             // Check if this is a response with the expected id. We emit
             // string IDs because some MCP gateways reject numeric JSON-RPC
@@ -3981,6 +4005,7 @@ mod tests {
             request_id: AtomicU64::new(1),
             state: ConnectionState::Ready,
             config: test_server_config(),
+            read_timeout_secs: default_read_timeout(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -4044,6 +4069,29 @@ mod tests {
 
         assert!(msg.contains("Invalid MCP JSON-RPC message from server 'mock'"));
         assert!(msg.contains("Allow Burp MCP connection"));
+        assert_eq!(conn.state(), ConnectionState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn recv_times_out_waiting_for_mcp_response_and_disconnects() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut conn = test_connection(Box::new(HangingValueTransport {
+            sent: Arc::clone(&sent),
+        }));
+        conn.read_timeout_secs = 0;
+
+        let err = conn
+            .recv("1".to_string())
+            .await
+            .expect_err("hung transport should time out inside recv");
+
+        assert!(
+            err.to_string().contains(
+                "Timed out waiting for MCP JSON-RPC response from server 'mock' after 0s"
+            ),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(conn.state(), ConnectionState::Disconnected);
     }
 
     #[tokio::test]
