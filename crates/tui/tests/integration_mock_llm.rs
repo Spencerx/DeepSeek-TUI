@@ -42,6 +42,10 @@ use futures_util::StreamExt;
 
 // Bring in the production model types verbatim — no other crate sources are
 // needed because the mock is self-contained against `models.rs`.
+#[path = "../src/model_catalog.rs"]
+#[allow(dead_code)]
+mod model_catalog;
+
 #[path = "../src/models.rs"]
 #[allow(dead_code)]
 mod models;

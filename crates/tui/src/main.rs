@@ -51,6 +51,7 @@ mod lsp;
 mod mcp;
 mod mcp_server;
 mod memory;
+mod model_catalog;
 mod model_inventory;
 mod model_registry;
 mod model_routing;

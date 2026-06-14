@@ -142,6 +142,15 @@ fn pricing_for_model_at(model: &str, _now: DateTime<Utc>) -> Option<ModelPricing
 }
 
 fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
+    if let Some((input_usd_per_million, output_usd_per_million)) =
+        crate::model_catalog::resolved_usd_pricing(model_lower)
+    {
+        return Some(usd_only_pricing(
+            input_usd_per_million,
+            input_usd_per_million,
+            output_usd_per_million,
+        ));
+    }
     match model_lower {
         "xiaomi/mimo-v2.5-pro" | "mimo-v2.5-pro" => Some(deepseek_v4_pro_pricing()),
         "xiaomi/mimo-v2.5" | "mimo-v2.5" => Some(deepseek_v4_flash_pricing()),
@@ -372,6 +381,7 @@ pub fn format_cost_estimate(estimate: CostEstimate, currency: CostCurrency) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn nvidia_nim_deepseek_model_does_not_use_deepseek_platform_pricing() {
@@ -420,6 +430,40 @@ mod tests {
             assert!(estimate.usd > 0.0, "expected positive USD for {model}");
             assert_eq!(estimate.cny, 0.0);
         }
+    }
+
+    #[test]
+    fn catalog_pricing_overrides_known_row_when_present() {
+        let _lock = crate::model_catalog::test_catalog_lock();
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "catalog-priced-model".to_string(),
+            crate::model_catalog::CatalogEntry {
+                id: "catalog-priced-model".to_string(),
+                context_window: None,
+                max_output: None,
+                supports_reasoning: None,
+                input_usd_per_million: Some(0.25),
+                output_usd_per_million: Some(1.25),
+                modalities: Vec::new(),
+                supported_parameters: Vec::new(),
+                provider_model_id: None,
+                provenance: crate::model_catalog::MetadataProvenance::UserOverride,
+            },
+        );
+        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+            overrides,
+            None,
+            crate::model_catalog::bundled_catalog(),
+            Utc::now(),
+        );
+        let _guard = crate::model_catalog::replace_active_catalog_for_test(catalog);
+
+        let pricing = pricing_for_model_at("catalog-priced-model", Utc::now()).expect("pricing");
+        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.25);
+        assert_eq!(pricing.usd.input_cache_miss_per_million, 0.25);
+        assert_eq!(pricing.usd.output_per_million, 1.25);
+        assert!(pricing.cny.is_none());
     }
 
     #[test]

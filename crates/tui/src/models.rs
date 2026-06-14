@@ -236,6 +236,9 @@ pub struct Usage {
 /// 3. Claude -> 200K.
 #[must_use]
 pub fn context_window_for_model(model: &str) -> Option<u32> {
+    if let Some(window) = crate::model_catalog::resolved_context_window(model) {
+        return Some(window);
+    }
     let lower = model.to_lowercase();
     if let Some(explicit_window) = explicit_context_window_hint(&lower) {
         return Some(explicit_window);
@@ -323,6 +326,9 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
 
 #[must_use]
 pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
+    if let Some(max_output) = crate::model_catalog::resolved_max_output(model) {
+        return Some(max_output);
+    }
     let lower = model.to_lowercase();
     if lower.contains("deepseek") && lower.contains("v4") {
         return Some(384_000);
@@ -364,6 +370,9 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
 
 #[must_use]
 pub fn model_supports_reasoning(model: &str) -> bool {
+    if let Some(supports_reasoning) = crate::model_catalog::resolved_supports_reasoning(model) {
+        return supports_reasoning;
+    }
     let lower = model.to_lowercase();
     if lower.contains("deepseek") && lower.contains("v4") {
         return true;
@@ -608,6 +617,7 @@ pub struct MessageDelta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn v4_snapshots_preserve_context_window() {
@@ -716,6 +726,44 @@ mod tests {
         assert_eq!(context_window_for_model("gpt-5.5-nano"), None);
         assert_eq!(max_output_tokens_for_model("gpt-5.5-nano"), None);
         assert!(!model_supports_reasoning("gpt-5.5-nano"));
+    }
+
+    #[test]
+    fn model_metadata_catalog_override_flows_through_models_chokepoint() {
+        let _lock = crate::model_catalog::test_catalog_lock();
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "catalog-only-model".to_string(),
+            crate::model_catalog::CatalogEntry {
+                id: "catalog-only-model".to_string(),
+                context_window: Some(777_000),
+                max_output: Some(55_000),
+                supports_reasoning: Some(true),
+                input_usd_per_million: None,
+                output_usd_per_million: None,
+                modalities: Vec::new(),
+                supported_parameters: Vec::new(),
+                provider_model_id: None,
+                provenance: crate::model_catalog::MetadataProvenance::UserOverride,
+            },
+        );
+        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+            overrides,
+            None,
+            crate::model_catalog::bundled_catalog(),
+            chrono::Utc::now(),
+        );
+        let _guard = crate::model_catalog::replace_active_catalog_for_test(catalog);
+
+        assert_eq!(
+            context_window_for_model("catalog-only-model"),
+            Some(777_000)
+        );
+        assert_eq!(
+            max_output_tokens_for_model("catalog-only-model"),
+            Some(55_000)
+        );
+        assert!(model_supports_reasoning("catalog-only-model"));
     }
 
     #[test]
