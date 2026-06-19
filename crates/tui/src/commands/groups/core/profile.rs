@@ -10,7 +10,7 @@ pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "profile",
     aliases: &["dangan"],
     usage: "/profile <name>",
-    description_id: MessageId::CmdHelpDescription,
+    description_id: MessageId::CmdProfileDescription,
 };
 
 pub(in crate::commands) struct ProfileCmd;
