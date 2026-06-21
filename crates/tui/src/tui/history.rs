@@ -45,11 +45,11 @@ use thinking::{render_hidden_thinking_activity, render_thinking};
 #[cfg(test)]
 use agent_activity::extract_agent_id;
 pub use plan::PlanUpdateCell;
-pub use thinking::extract_reasoning_summary;
-pub use tool_run::{
-    ToolRun, ToolRunActivitySummary, detect_tool_runs, detect_tool_runs_from_slices,
-    tool_run_summary,
-};
+#[cfg(test)]
+use thinking::extract_reasoning_summary;
+#[cfg(test)]
+use tool_run::ToolRunActivitySummary;
+pub use tool_run::{ToolRun, detect_tool_runs, detect_tool_runs_from_slices, tool_run_summary};
 
 #[cfg(test)]
 use thinking::{REASONING_CURSOR, REASONING_OPENER, REASONING_RAIL};
