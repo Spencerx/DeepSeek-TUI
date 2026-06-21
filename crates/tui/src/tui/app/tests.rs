@@ -389,6 +389,23 @@ fn app_new_defaults_auto_compact_on_for_256k_class_models_when_unset() {
 }
 
 #[test]
+fn app_new_defaults_auto_compact_on_for_v4_class_models_when_unset() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    let _config_path = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+
+    let mut options = test_options(false);
+    options.model = "deepseek-v4-pro".to_string();
+    let app = App::new(options, &Config::default());
+
+    assert!(app.auto_compact);
+    assert!(!app.auto_compact_user_configured);
+    assert_eq!(app.auto_compact_threshold_percent, 80.0);
+    assert_eq!(app.compact_threshold, 800_000);
+}
+
+#[test]
 fn app_new_respects_explicit_auto_compact_false_for_256k_class_models() {
     let _lock = lock_test_env();
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -403,6 +420,23 @@ fn app_new_respects_explicit_auto_compact_false_for_256k_class_models() {
     assert!(!app.auto_compact);
     assert!(app.auto_compact_user_configured);
     assert_eq!(app.compact_threshold, 209_715);
+}
+
+#[test]
+fn app_new_respects_explicit_auto_compact_false_for_v4_class_models() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(tmp.path().join("settings.toml"), "auto_compact = false\n").expect("settings");
+    let _config_path = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+
+    let mut options = test_options(false);
+    options.model = "deepseek-v4-pro".to_string();
+    let app = App::new(options, &Config::default());
+
+    assert!(!app.auto_compact);
+    assert!(app.auto_compact_user_configured);
+    assert_eq!(app.compact_threshold, 800_000);
 }
 
 #[test]

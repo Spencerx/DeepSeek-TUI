@@ -2363,7 +2363,8 @@ impl RuntimeThreadManager {
             }
         }
 
-        // Compaction defaults to disabled in v0.6.6 — the cycle architecture
+        // Resolve the model-aware auto-compaction default unless the user
+        // persisted an explicit preference.
         let settings = crate::settings::Settings::load().unwrap_or_default();
         let auto_compact_enabled =
             if crate::settings::Settings::auto_compact_explicitly_configured() {

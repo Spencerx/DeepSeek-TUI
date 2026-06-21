@@ -853,12 +853,12 @@ codewhale also stores user preferences in:
 - `~/.deepseek/settings.toml` or the legacy platform config-dir
   `deepseek/settings.toml` when an existing settings file is present
 
-Notable settings include `auto_compact` (default `false` for 1M-class models,
-model-aware default-on for 256K-class models), which opts into replacement-style
-summarization before the active model limit. The trigger defaults to
-`auto_compact_threshold_percent = 80`. The default V4 path preserves the stable
-message prefix for cache reuse; use manual `/compact` / Ctrl+L or enable
-`auto_compact` when you explicitly want automatic replacement compaction.
+Notable settings include `auto_compact`, which uses a model-aware default-on
+policy for known context windows up to the 1M-token V4 class. Automatic
+compaction runs before the active model limit and carries the compacted summary
+forward into the next request. The trigger defaults to
+`auto_compact_threshold_percent = 80`. Users who prefer manual continuity can
+persist `auto_compact = false`; manual `/compact` / Ctrl+L remains available.
 You can inspect or update these from the TUI with `/settings` and `/config`
 (interactive editor).
 
@@ -870,7 +870,8 @@ Common settings keys:
   palettes, `grayscale` is the low-opinion black/white theme, and the named
   community presets apply across the TUI. Aliases such as `whale`, `mono`,
   `black-white`, `tokyonight`, and `gruvbox` are accepted.
-- `auto_compact` (on/off, default off)
+- `auto_compact` (on/off, model-aware default on for known context windows
+  unless explicitly configured)
 - `auto_compact_threshold_percent` (10-100, default `80`): pre-send
   auto-compaction threshold used only when `auto_compact` is enabled.
 - `paste_burst_detection` (on/off, default on): fallback rapid-key paste
@@ -944,12 +945,13 @@ separate:
 | Context percent | Active request input estimate divided by the model context window. | Display only; it mirrors the active-input basis used by context safeguards. |
 | Cost estimate | Approximate spend from provider usage and configured DeepSeek rates. | Display only. |
 
-For the default V4 path, replacement compaction remains opt-in
-(`auto_compact = false` by default) and fires at the active model's
-compaction threshold when enabled. For 256K-class models, auto-compaction is
-enabled by default unless the user explicitly configures `auto_compact`. The
-Flash seam manager remains opt-in (`[context].enabled = false`), and the
-capacity controller remains disabled unless configured.
+For known context-window models, including 1M-class V4 models, replacement
+compaction is enabled by default unless the user explicitly configures
+`auto_compact = false`. It fires at the active model's compaction threshold and
+replays the generated summary through the stable system prompt on the next
+request. Unknown model ids remain opt-in. The Flash seam manager remains opt-in
+(`[context].enabled = false`), and the capacity controller remains disabled
+unless configured.
 
 ### Command Migration Notes
 
