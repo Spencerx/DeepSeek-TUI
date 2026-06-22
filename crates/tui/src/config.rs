@@ -2015,14 +2015,13 @@ pub struct Config {
     /// schemas into DeepSeek beta strict mode. Schemas with root alternatives
     /// stay non-strict to avoid changing optional/one-of tool semantics.
     pub strict_tool_mode: Option<bool>,
-    /// Additional system-prompt sources concatenated in declared order
-    /// (#454). Paths are expanded via `expand_path` so `~` and env
-    /// vars work. Project config overrides user config (replace, not
-    /// merge) — that's the typical "this repo needs X plus everything
-    /// I already have" pattern, where users put `~/global.md` in the
-    /// project's array if they want both. Each file is loaded, capped
-    /// at 100 KiB, and skipped (with a warning) on read errors so a
-    /// missing optional file doesn't fail the launch.
+    /// Additional user-owned system-prompt sources concatenated in declared
+    /// order (#454). Paths are expanded via `expand_path` so `~` and env vars
+    /// work. Project-scope config is not allowed to set this field; the TUI
+    /// project overlay ignores `instructions` so a cloned repo cannot choose
+    /// arbitrary local files to place into the prompt. Each configured file is
+    /// loaded, capped at 100 KiB, and skipped (with a warning) on read errors so
+    /// a missing optional file doesn't fail the launch.
     pub instructions: Option<Vec<String>>,
     pub allow_shell: Option<bool>,
     /// Opt-in ghost-text follow-up prompt suggestion after each completed turn.
@@ -5389,9 +5388,9 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         notes_path: override_cfg.notes_path.or(base.notes_path),
         memory_path: override_cfg.memory_path.or(base.memory_path),
         vision_model: override_cfg.vision_model.or(base.vision_model),
-        // #454: project's instructions array replaces user's array
-        // wholesale. The typical "merge" pattern is for users who want
-        // both — they list `~/global.md` inside the project array.
+        // #454: user-owned overlays such as profiles and managed config may
+        // replace the instruction array. Project-scope config is filtered in
+        // main.rs and cannot set instruction paths.
         instructions: override_cfg.instructions.or(base.instructions),
         allow_shell: override_cfg.allow_shell.or(base.allow_shell),
         prompt_suggestion: override_cfg.prompt_suggestion.or(base.prompt_suggestion),

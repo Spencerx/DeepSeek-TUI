@@ -108,41 +108,39 @@ this user-owned override.
 
 In interactive mode, the per-project overlay
 `<workspace>/.codewhale/config.toml` is applied after this user entry. A
-project-level `allow_shell = false` still takes precedence.
+project-level `allow_shell = false` can still tighten the session; project-level
+`allow_shell = true` is ignored.
 
 ### Per-project overlay (#485)
 
-When the TUI starts in a workspace that contains a
-`<workspace>/.codewhale/config.toml` file, the values declared in that
-file are merged on top of the global config. Legacy
-`<workspace>/.deepseek/config.toml` files are still read when the
-CodeWhale path is absent. This lets a repo lock its own provider,
-model, sandbox policy, or approval policy without touching the user's
-`~/.codewhale/config.toml`. Pass
-`--no-project-config` to skip the overlay for one launch.
+When the TUI starts in a workspace that contains a regular-file
+`<workspace>/.codewhale/config.toml`, the safe values declared in that file are
+merged on top of the global config. Legacy
+`<workspace>/.deepseek/config.toml` files are still read when the CodeWhale path
+is absent. Symlinked project config files are rejected. This lets a repo suggest
+a model or tighten local safety posture without touching the user's
+`~/.codewhale/config.toml`. Pass `--no-project-config` to skip the overlay for
+one launch.
 
 Supported keys in the project overlay (top-level fields only):
 
 | Key | Effect |
 |---|---|
-| `provider` | switch backend (e.g. `"nvidia-nim"` for an enterprise repo) |
 | `model` | override `default_text_model` |
-| `api_key` | use a per-repo key (typically read from `.env`, **not committed**) |
-| `base_url` | point at a self-hosted endpoint |
 | `reasoning_effort` | force `"high"` / `"max"` for a complex repo |
-| `verbosity` | use `"normal"` or `"concise"` prompt/output discipline |
-| `approval_policy` | `"never"` / `"on-request"` / `"untrusted"` for opinionated repos |
-| `sandbox_mode` | `"read-only"` / `"workspace-write"` / `"danger-full-access"` |
-| `mcp_config_path` | per-repo MCP server set |
+| `approval_policy` | only values that tighten the user's current approval posture |
+| `sandbox_mode` | only values that tighten the user's current sandbox posture |
 | `notes_path` | keep notes in-repo |
 | `max_subagents` | clamp sub-agent concurrency for a constrained repo (clamped to 1..=20) |
-| `allow_shell` | gate shell tool access on `false` |
+| `allow_shell` | `false` can disable shell access; `true` is ignored |
 
 The overlay is intentionally narrow — it covers the fields a repo
 maintainer is most likely to want to standardize across contributors.
-Other settings (skills_dir, hooks, capacity, retry, etc.) stay
-user-global. If your repo needs more, file an issue describing the
-specific use case.
+Credential, endpoint, provider-selection, MCP config, hooks, skills, capacity,
+retry, and `instructions = [...]` settings stay user-global. If a repo-local
+config declares `api_key`, `base_url`, `provider`, `mcp_config_path`,
+`allow_shell = true`, or `instructions`, CodeWhale ignores that key and keeps
+the user's global setting.
 
 The `codewhale` facade and `codewhale-tui` binary share the same config file for
 DeepSeek auth and model defaults. `codewhale auth set --provider deepseek` (and
@@ -563,12 +561,10 @@ Rules:
   truncated with a `[…elided]` marker rather than skipped.
 - Missing files are skipped with a tracing warning so a stale
   entry doesn't fail the launch.
-- Project config (`<workspace>/.codewhale/config.toml`, or legacy
-  `<workspace>/.deepseek/config.toml`)
-  **replaces** the user array wholesale rather than merging.
-  If you want both, list `~/global.md` inside the project
-  array. Set `instructions = []` in the project to clear the
-  user list for that repo.
+- Only user-owned config, profiles, and managed config may set this array.
+  Project config (`<workspace>/.codewhale/config.toml`, or legacy
+  `<workspace>/.deepseek/config.toml`) ignores `instructions` so a cloned repo
+  cannot choose arbitrary local files to place into the prompt.
 
 ### `/hooks` listing
 
