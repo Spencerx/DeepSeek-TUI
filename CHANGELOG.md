@@ -66,10 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#2574); and context window and memory-pressure come from the resolved route
   (#3086).
 - **UX.** Approval modal gained a group divider and selected-row caret (#3515);
-  picker scroll/type-ahead and selection contrast hardened (#3500); live
-  sub-agent cards re-anchor to the active turn instead of the transcript tail
-  (#3478); the README was rewritten as an architecture end-cap (#3087); and
-  repo agent guidance was de-hardcoded to live truth.
+  picker scroll/type-ahead and selection contrast hardened (#3500); the README
+  was rewritten as an architecture end-cap (#3087); and repo agent guidance was
+  de-hardcoded to live truth.
 - **Restored contributor credit.** Threaded machine-readable credit
   (`docs/CONTRIBUTORS.md` + `.github/AUTHOR_MAP`) for earlier merged work that
   shipped without it, including the `/jobs cancel-all` action and the npm
