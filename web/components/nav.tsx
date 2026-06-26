@@ -1,12 +1,10 @@
-"use client";
-
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import type { Locale } from "@/lib/i18n/config";
 import { Seal } from "./seal";
 import { Whale } from "./whale";
 import { LocaleSwitcher } from "./locale-switcher";
 import { MobileMenu } from "./mobile-menu";
+import { NavLinks } from "./nav-links";
 
 const EN_LINKS = [
   { href: "/en/install", label: "Install", cn: "安装" },
@@ -33,7 +31,6 @@ const ZH_LINKS = [
 export function Nav({ locale = "en" }: { locale?: Locale }) {
   const isZh = locale === "zh";
   const links = isZh ? ZH_LINKS : EN_LINKS;
-  const pathname = usePathname();
 
   return (
     <header className="hairline-b bg-paper/85 backdrop-blur sticky top-0 z-30">
@@ -66,19 +63,7 @@ export function Nav({ locale = "en" }: { locale?: Locale }) {
           </div>
         </Link>
 
-        <nav className="hidden md:flex items-center gap-7">
-          {links.map((l) => {
-            const isActive = pathname === l.href || pathname.startsWith(`${l.href}/`);
-            return (
-              <Link key={l.href} href={l.href} className="nav-link group" aria-current={isActive ? "page" : undefined}>
-                <span>{l.label}</span>
-                {!isZh && "cn" in l && l.cn && (
-                  <span className="font-cjk text-[0.66rem] ml-1.5 text-ink-mute">{l.cn}</span>
-                )}
-              </Link>
-            );
-          })}
-        </nav>
+        <NavLinks links={links} isZh={isZh} />
 
         <div className="flex items-center gap-2 sm:gap-3">
           <LocaleSwitcher current={locale} />
