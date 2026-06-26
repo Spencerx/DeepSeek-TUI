@@ -286,6 +286,7 @@ fn build_persistent_ask_rules(
         // edit/write of the same file is matched. read_file stays out: this
         // boundary is about persisting *write* approvals only.
         "write_file" | "edit_file" => build_file_write_ask_rules(tool_name, params, workspace),
+        "apply_patch" => build_apply_patch_ask_rules(params, workspace),
         _ => Vec::new(),
     }
 }
@@ -330,6 +331,30 @@ fn build_file_write_ask_rules(
         return Vec::new();
     };
     vec![ToolAskRule::file_path(tool_name, relative)]
+}
+
+#[must_use]
+fn build_apply_patch_ask_rules(params: &Value, workspace: &Path) -> Vec<ToolAskRule> {
+    let Ok(preflight) = crate::tools::apply_patch::preflight_apply_patch(params) else {
+        return Vec::new();
+    };
+    let workspace = workspace.to_string_lossy();
+    let mut rules = Vec::new();
+
+    for path in preflight.touched_files {
+        let Some(relative) =
+            codewhale_execpolicy::normalize_workspace_relative_path(&path, workspace.as_ref())
+                .filter(|relative| !relative.is_empty())
+        else {
+            return Vec::new();
+        };
+        let rule = ToolAskRule::file_path("apply_patch", relative);
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+    }
+
+    rules
 }
 
 /// Get the category for a tool by name
@@ -2180,6 +2205,142 @@ mod tests {
             assert!(!request.can_save_ask_rule());
             assert_eq!(request.ask_rule_preview(), None);
         }
+    }
+
+    #[test]
+    fn apply_patch_ask_rules_saved_for_multi_file_patch() {
+        let patch = r"diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,1 +1,1 @@
+-old
++new
+diff --git a/src/b.rs b/src/b.rs
+--- a/src/b.rs
++++ b/src/b.rs
+@@ -1,1 +1,1 @@
+-old
++new
+";
+
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({"patch": patch}),
+            "tool:apply_patch",
+        );
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![
+                ToolAskRule::file_path("apply_patch", "src/a.rs"),
+                ToolAskRule::file_path("apply_patch", "src/b.rs"),
+            ]
+        );
+        assert!(request.can_save_ask_rule());
+    }
+
+    #[test]
+    fn apply_patch_ask_rules_dedupe_targets_after_normalization() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({
+                "changes": [
+                    { "path": "src/a.rs", "content": "one" },
+                    { "path": "/workspace/src/a.rs", "content": "two" }
+                ]
+            }),
+            "tool:apply_patch",
+        );
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::file_path("apply_patch", "src/a.rs")]
+        );
+    }
+
+    #[test]
+    fn apply_patch_ask_rule_handles_timestamp_headers() {
+        let patch = "diff --git a/src/lib.rs b/src/lib.rs\n\
+--- a/src/lib.rs\t2026-06-26 10:00:00 +0000\n\
++++ b/src/lib.rs\t2026-06-26 10:01:00 +0000\n\
+@@ -1,1 +1,1 @@\n\
+-old\n\
++new\n";
+
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({"patch": patch}),
+            "tool:apply_patch",
+        );
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::file_path("apply_patch", "src/lib.rs")]
+        );
+    }
+
+    #[test]
+    fn apply_patch_ask_rule_ignores_forged_headers_inside_hunk() {
+        let patch = r"--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,3 @@
+ line1
+--- a/forged.rs
++++ b/forged.rs
+ line3
+";
+
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({"path": "src/lib.rs", "patch": patch}),
+            "tool:apply_patch",
+        );
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::file_path("apply_patch", "src/lib.rs")]
+        );
+    }
+
+    #[test]
+    fn apply_patch_ask_rule_skipped_when_any_target_traverses_workspace() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({
+                "changes": [
+                    { "path": "src/a.rs", "content": "safe" },
+                    { "path": "../escape.rs", "content": "unsafe" }
+                ]
+            }),
+            "tool:apply_patch",
+        );
+
+        assert!(request.persistent_ask_rules.is_empty());
+        assert!(!request.can_save_ask_rule());
+    }
+
+    #[test]
+    fn apply_patch_ask_rule_skipped_on_preflight_failure() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({"patch": "@@ -1 +1 @@\n-old\n+new\n"}),
+            "tool:apply_patch",
+        );
+
+        assert!(request.persistent_ask_rules.is_empty());
+        assert_eq!(request.ask_rule_preview(), None);
     }
 
     #[test]
