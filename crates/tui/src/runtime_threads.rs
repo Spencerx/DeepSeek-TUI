@@ -791,7 +791,7 @@ pub type SharedRuntimeThreadManager = Arc<RuntimeThreadManager>;
 /// preserve a consistent ordering.
 #[derive(Clone)]
 pub struct RuntimeThreadManager {
-    config: Config,
+    config: Arc<parking_lot::RwLock<Config>>,
     workspace: PathBuf,
     store: RuntimeThreadStore,
     active: Arc<Mutex<ActiveThreads>>,
@@ -844,6 +844,116 @@ pub enum ExternalApprovalDecision {
 }
 
 impl RuntimeThreadManager {
+    /// Helper to read the current config under RwLock.
+    fn read_config(&self) -> parking_lot::RwLockReadGuard<'_, Config> {
+        self.config.read()
+    }
+
+    /// Reload config from an updated Config instance (called after /v1/config/reload).
+    pub fn reload_config(&self, new_config: Config) {
+        let mut guard = self.config.write();
+        *guard = new_config;
+    }
+
+    /// Propagate the current config to all active engines by sending
+    /// `Op::SetModel`, `Op::SetCompaction`, `Op::SetStreamChunkTimeout`, and
+    /// `Op::SetSubagentRuntimeConfig`. This mirrors what the TUI does via
+    /// `apply_model_and_compaction_update` after a config change, ensuring
+    /// running engines pick up the new settings without a restart.
+    pub async fn sync_engines_with_config(&self) {
+        let (default_model, compaction_template, stream_chunk_timeout_secs, subagent_cfg) = {
+            let cfg = self.read_config();
+            let settings = crate::settings::Settings::load().unwrap_or_default();
+            let provider = cfg.api_provider();
+            let auto_compact_enabled =
+                if crate::settings::Settings::auto_compact_explicitly_configured() {
+                    settings.auto_compact
+                } else {
+                    auto_compact_default_for_model(
+                        &cfg.default_text_model.clone().unwrap_or_default(),
+                    )
+                };
+            let compaction = crate::compaction::CompactionConfig {
+                enabled: auto_compact_enabled,
+                model: String::new(), // per-engine, filled below
+                token_threshold: compaction_threshold_for_model_at_percent(
+                    &cfg.default_text_model.clone().unwrap_or_default(),
+                    settings.auto_compact_threshold_percent,
+                ),
+                ..Default::default()
+            };
+            let subagent = (
+                cfg.subagents_enabled_for_provider(provider),
+                cfg.max_subagents_for_provider(provider)
+                    .clamp(1, crate::config::MAX_SUBAGENTS),
+                cfg.launch_concurrency_for_provider(provider),
+                cfg.subagent_max_spawn_depth_for_provider(provider),
+                cfg.subagent_api_timeout_secs_for_provider(provider),
+                cfg.subagent_heartbeat_timeout_secs_for_provider(provider),
+            );
+            (
+                cfg.default_text_model.clone().unwrap_or_default(),
+                compaction,
+                cfg.stream_chunk_timeout_secs(),
+                subagent,
+            )
+        };
+
+        // Collect engine handles and thread IDs, then release the active lock
+        // before doing any async work (sending Ops, loading thread records).
+        let entries: Vec<(String, EngineHandle)> = {
+            let active = self.active.lock().await;
+            active
+                .engines
+                .iter()
+                .map(|(id, state)| (id.clone(), state.engine.clone()))
+                .collect()
+        };
+
+        for (thread_id, engine) in entries {
+            let engine_model = self
+                .store
+                .load_thread(&thread_id)
+                .ok()
+                .map(|t| t.model)
+                .unwrap_or_else(|| default_model.clone());
+            let engine_compaction = crate::compaction::CompactionConfig {
+                model: engine_model.clone(),
+                ..compaction_template.clone()
+            };
+
+            let _ = engine
+                .send(Op::SetModel {
+                    model: engine_model,
+                    mode: crate::tui::app::AppMode::Agent,
+                    route_limits: None,
+                })
+                .await;
+            let _ = engine
+                .send(Op::SetCompaction {
+                    config: engine_compaction,
+                })
+                .await;
+            let _ = engine
+                .send(Op::SetStreamChunkTimeout {
+                    timeout_secs: stream_chunk_timeout_secs,
+                })
+                .await;
+            let _ = engine
+                .send(Op::SetSubagentRuntimeConfig {
+                    enabled: subagent_cfg.0,
+                    max_subagents: subagent_cfg.1,
+                    launch_concurrency: subagent_cfg.2,
+                    max_spawn_depth: subagent_cfg.3,
+                    api_timeout_secs: subagent_cfg.4,
+                    heartbeat_timeout_secs: subagent_cfg.5,
+                })
+                .await;
+
+            tracing::info!(thread_id = %thread_id, "Synced engine with reloaded config");
+        }
+    }
+
     pub fn open(
         config: Config,
         workspace: PathBuf,
@@ -852,7 +962,7 @@ impl RuntimeThreadManager {
         let store = RuntimeThreadStore::open(manager_cfg.data_dir.clone())?;
         let (event_tx, _event_rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let manager = Self {
-            config,
+            config: Arc::new(parking_lot::RwLock::new(config)),
             workspace,
             store,
             active: Arc::new(Mutex::new(ActiveThreads::default())),
@@ -1086,14 +1196,16 @@ impl RuntimeThreadManager {
         let model = req
             .model
             .filter(|m| !m.trim().is_empty())
-            .or_else(|| self.config.default_text_model.clone())
+            .or_else(|| self.read_config().default_text_model.clone())
             .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string());
         let workspace = req.workspace.unwrap_or_else(|| self.workspace.clone());
         let mode = req
             .mode
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| "agent".to_string());
-        let allow_shell = req.allow_shell.unwrap_or_else(|| self.config.allow_shell());
+        let allow_shell = req
+            .allow_shell
+            .unwrap_or_else(|| self.read_config().allow_shell());
         let trust_mode = req.trust_mode.unwrap_or(false);
         let auto_approve = req.auto_approve.unwrap_or(false);
 
@@ -2037,24 +2149,31 @@ impl RuntimeThreadManager {
             .unwrap_or_else(|| parse_mode(&thread.mode));
         let requested_model = req.model.unwrap_or_else(|| thread.model.clone());
         let auto_model = requested_model.trim().eq_ignore_ascii_case("auto");
-        let (provider, model, reasoning_effort) = if auto_model {
-            let selection = crate::model_routing::resolve_auto_route_with_inventory(
-                &self.config,
-                &prompt,
-                "",
-                "auto",
-                "auto",
-            )
-            .await?;
-            (
-                selection.provider,
-                selection.model,
-                selection
-                    .reasoning_effort
-                    .map(|effort| effort.as_setting().to_string()),
-            )
-        } else {
-            (self.config.api_provider(), requested_model, None)
+        // Snapshot config to avoid holding RwLockReadGuard across await points.
+        let cfg_snapshot = self.config.read().clone();
+        let (provider, model, reasoning_effort, verbosity) = {
+            let verbosity = cfg_snapshot.verbosity.clone();
+            if auto_model {
+                let selection = crate::model_routing::resolve_auto_route_with_inventory(
+                    &cfg_snapshot,
+                    &prompt,
+                    "",
+                    "auto",
+                    "auto",
+                )
+                .await?;
+                (
+                    selection.provider,
+                    selection.model,
+                    selection
+                        .reasoning_effort
+                        .map(|effort| effort.as_setting().to_string()),
+                    verbosity,
+                )
+            } else {
+                let provider = cfg_snapshot.api_provider();
+                (provider, requested_model, None, verbosity)
+            }
         };
         let allow_shell = req.allow_shell.unwrap_or(thread.allow_shell);
         let trust_mode = req.trust_mode.unwrap_or(thread.trust_mode);
@@ -2088,7 +2207,7 @@ impl RuntimeThreadManager {
                 } else {
                     crate::tui::approval::ApprovalMode::Suggest
                 },
-                verbosity: self.config.verbosity.clone(),
+                verbosity,
                 provenance: crate::core::ops::UserInputProvenance::ExternalUser,
             })
             .await
@@ -2374,6 +2493,9 @@ impl RuntimeThreadManager {
             }
         }
 
+        // Snapshot config once to avoid holding RwLockReadGuard across await points.
+        let cfg = self.read_config().clone();
+
         // Resolve the model-aware auto-compaction default unless the user
         // persisted an explicit preference.
         let settings = crate::settings::Settings::load().unwrap_or_default();
@@ -2392,17 +2514,15 @@ impl RuntimeThreadManager {
             ),
             ..Default::default()
         };
-        let network_policy = self.config.network.clone().map(|toml_cfg| {
+        let network_policy = cfg.network.clone().map(|toml_cfg| {
             crate::network_policy::NetworkPolicyDecider::with_default_audit(toml_cfg.into_runtime())
         });
-        let lsp_config = self
-            .config
+        let lsp_config = cfg
             .lsp
             .clone()
             .map(crate::config::LspConfigToml::into_runtime);
-        let provider = self.config.api_provider();
-        let max_subagents = self
-            .config
+        let provider = cfg.api_provider();
+        let max_subagents = cfg
             .max_subagents_for_provider(provider)
             .clamp(1, MAX_SUBAGENTS);
         let engine_cfg = EngineConfig {
@@ -2411,39 +2531,36 @@ impl RuntimeThreadManager {
             workspace: thread.workspace.clone(),
             allow_shell: thread.allow_shell,
             trust_mode: thread.trust_mode,
-            notes_path: self.config.notes_path(),
-            mcp_config_path: self.config.mcp_config_path(),
-            skills_dir: self.config.skills_dir(),
-            skills_scan_codewhale_only: self.config.skills_config().scan_codewhale_only(),
-            instructions: self
-                .config
+            notes_path: cfg.notes_path(),
+            mcp_config_path: cfg.mcp_config_path(),
+            skills_dir: cfg.skills_dir(),
+            skills_scan_codewhale_only: cfg.skills_config().scan_codewhale_only(),
+            instructions: cfg
                 .instructions_paths()
                 .into_iter()
                 .map(Into::into)
                 .collect(),
-            project_context_pack_enabled: self.config.project_context_pack_enabled(),
+            project_context_pack_enabled: cfg.project_context_pack_enabled(),
             translation_enabled: false,
             show_thinking: settings.show_thinking,
             max_steps: 100,
             max_subagents,
-            max_admitted_subagents: self
-                .config
+            max_admitted_subagents: cfg
                 .max_admitted_subagents_for_provider(provider)
                 .max(max_subagents),
-            launch_concurrency: self.config.launch_concurrency_for_provider(provider),
-            subagents_enabled: self.config.subagents_enabled_for_provider(provider),
-            features: self.config.features(),
-            auto_review_policy: self.config.auto_review_policy(),
+            launch_concurrency: cfg.launch_concurrency_for_provider(provider),
+            subagents_enabled: cfg.subagents_enabled_for_provider(provider),
+            features: cfg.features(),
+            auto_review_policy: cfg.auto_review_policy(),
             compaction,
             todos: new_shared_todo_list(),
             plan_state: new_shared_plan_state(),
             goal_state: crate::tools::goal::new_shared_goal_state(),
-            max_spawn_depth: self.config.subagent_max_spawn_depth_for_provider(provider),
-            subagent_token_budget: self.config.subagent_token_budget_for_provider(provider),
+            max_spawn_depth: cfg.subagent_max_spawn_depth_for_provider(provider),
+            subagent_token_budget: cfg.subagent_token_budget_for_provider(provider),
             network_policy,
-            snapshots_enabled: self.config.snapshots_config().enabled,
-            snapshots_max_workspace_bytes: self
-                .config
+            snapshots_enabled: cfg.snapshots_config().enabled,
+            snapshots_max_workspace_bytes: cfg
                 .snapshots_config()
                 .max_workspace_gb
                 .saturating_mul(1024 * 1024 * 1024),
@@ -2460,23 +2577,20 @@ impl RuntimeThreadManager {
                 handle_store: crate::tools::handle::new_shared_handle_store(),
                 rlm_sessions: crate::rlm::session::new_shared_rlm_session_store(),
             },
-            subagent_model_overrides: self.config.subagent_model_overrides(),
+            subagent_model_overrides: cfg.subagent_model_overrides(),
             subagent_api_timeout: std::time::Duration::from_secs(
-                self.config.subagent_api_timeout_secs_for_provider(provider),
+                cfg.subagent_api_timeout_secs_for_provider(provider),
             ),
-            stream_chunk_timeout: std::time::Duration::from_secs(
-                self.config.stream_chunk_timeout_secs(),
-            ),
+            stream_chunk_timeout: std::time::Duration::from_secs(cfg.stream_chunk_timeout_secs()),
             subagent_heartbeat_timeout: std::time::Duration::from_secs(
-                self.config
-                    .subagent_heartbeat_timeout_secs_for_provider(provider),
+                cfg.subagent_heartbeat_timeout_secs_for_provider(provider),
             ),
-            prefer_bwrap: self.config.prefer_bwrap.unwrap_or(false),
-            memory_enabled: self.config.memory_enabled(),
-            memory_path: self.config.memory_path(),
-            speech_output_dir: self.config.speech_output_dir(),
-            vision_config: self.config.vision_model_config(),
-            strict_tool_mode: self.config.strict_tool_mode.unwrap_or(false),
+            prefer_bwrap: cfg.prefer_bwrap.unwrap_or(false),
+            memory_enabled: cfg.memory_enabled(),
+            memory_path: cfg.memory_path(),
+            speech_output_dir: cfg.speech_output_dir(),
+            vision_config: cfg.vision_model_config(),
+            strict_tool_mode: cfg.strict_tool_mode.unwrap_or(false),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -2486,18 +2600,18 @@ impl RuntimeThreadManager {
             locale_tag: crate::localization::resolve_locale(&settings.locale)
                 .tag()
                 .to_string(),
-            workshop: self.config.workshop.clone(),
-            search_provider: self.config.search_provider(),
-            search_api_key: self.config.search.as_ref().and_then(|s| s.api_key.clone()),
-            search_base_url: self.config.search.as_ref().and_then(|s| s.base_url.clone()),
-            tools_always_load: self.config.tools_always_load(),
-            tools: self.config.tools.clone(),
-            verbosity: self.config.verbosity.clone(),
+            workshop: cfg.workshop.clone(),
+            search_provider: cfg.search_provider(),
+            search_api_key: cfg.search.as_ref().and_then(|s| s.api_key.clone()),
+            search_base_url: cfg.search.as_ref().and_then(|s| s.base_url.clone()),
+            tools_always_load: cfg.tools_always_load(),
+            tools: cfg.tools.clone(),
+            verbosity: cfg.verbosity.clone(),
             workspace_follow_symlinks: settings.workspace_follow_symlinks,
-            exec_policy_engine: self.config.exec_policy_engine.clone(),
+            exec_policy_engine: cfg.exec_policy_engine.clone(),
         };
 
-        let engine = spawn_engine(engine_cfg, &self.config);
+        let engine = spawn_engine(engine_cfg, &cfg);
 
         // When the thread has an associated session, load the full message history
         // (including thinking/tool blocks) from the session file. This preserves

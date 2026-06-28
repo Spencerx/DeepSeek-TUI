@@ -618,6 +618,7 @@ async fn dispatch_stdio_request(
                     "app/config/set",
                     "app/config/unset",
                     "app/config/list",
+                    "app/config/reload",
                     "app/models",
                     "app/thread_loaded_list",
                     "prompt/capabilities",
@@ -883,6 +884,15 @@ async fn dispatch_stdio_request(
                 should_exit: false,
             }
         }
+        "app/config/reload" => {
+            let response =
+                process_app_request(state, AppRequest::ConfigReload, AppTransport::Stdio).await;
+            StdioDispatchResult {
+                result: serde_json::to_value(response)
+                    .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+                should_exit: false,
+            }
+        }
         "app/models" => {
             let response =
                 process_app_request(state, AppRequest::Models, AppTransport::Stdio).await;
@@ -935,7 +945,7 @@ async fn process_app_request(
             ok: true,
             data: json!({
                 "routes": ["/thread", "/app", "/prompt", "/tool", "/jobs", "/mcp/startup"],
-                "config": ["get", "set", "unset", "list"],
+                "config": ["get", "set", "unset", "list", "reload"],
                 "events": ["response_start", "response_delta", "response_end", "tool_call_start", "tool_call_result", "mcp_startup_update", "mcp_startup_complete"],
                 "transport": "stdio+http",
                 "config_path": state.config_path.as_ref().map(|p| p.display().to_string()),
@@ -961,9 +971,19 @@ async fn process_app_request(
             let message = result.err().map(|e| e.to_string());
             let snapshot = cfg.clone();
             drop(cfg);
+            // Clone for the runtime before persist consumes `snapshot`.
+            let runtime_snapshot = snapshot.clone();
             if let Err(e) = persist_config(state, snapshot).await {
                 tracing::error!("Failed to persist config after set: {e}");
             }
+            // Sync the updated config into the live Runtime so
+            // the next turn picks up the change without a restart.
+            // Only `config.toml` is touched here; `permissions.toml`
+            // (and therefore `exec_policy`) is intentionally left alone
+            // — use `ConfigReload` to pick up external permission edits.
+            let mut runtime = state.runtime.lock().await;
+            runtime.update_config(runtime_snapshot);
+            drop(runtime);
             AppResponse {
                 ok,
                 data: json!({ "key": key, "value": value, "error": message }),
@@ -977,9 +997,19 @@ async fn process_app_request(
             let message = result.err().map(|e| e.to_string());
             let snapshot = cfg.clone();
             drop(cfg);
+            // Clone for the runtime before persist consumes `snapshot`.
+            let runtime_snapshot = snapshot.clone();
             if let Err(e) = persist_config(state, snapshot).await {
                 tracing::error!("Failed to persist config after unset: {e}");
             }
+            // Sync the updated config into the live Runtime so
+            // the next turn picks up the change without a restart.
+            // Only `config.toml` is touched here; `permissions.toml`
+            // (and therefore `exec_policy`) is intentionally left alone
+            // — use `ConfigReload` to pick up external permission edits.
+            let mut runtime = state.runtime.lock().await;
+            runtime.update_config(runtime_snapshot);
+            drop(runtime);
             AppResponse {
                 ok,
                 data: json!({ "key": key, "error": message }),
@@ -991,6 +1021,52 @@ async fn process_app_request(
             AppResponse {
                 ok: true,
                 data: json!({ "values": cfg.list_values() }),
+                events: Vec::new(),
+            }
+        }
+        AppRequest::ConfigReload => {
+            // Re-read both `config.toml` and the sibling `permissions.toml`
+            // from disk (the headless equivalent of the TUI
+            // `reload_runtime_config` codepath) and push the fresh
+            // snapshots into `state.config` and the live `Runtime`.
+            //
+            // `ConfigStore::load` resolves the same default config path
+            // that `build_state` used at startup when `config_path` is
+            // `None`, so a `None` here reloads from the same on-disk file
+            // the server booted from.
+            let store = match ConfigStore::load(state.config_path.clone()) {
+                Ok(store) => store,
+                Err(e) => {
+                    return AppResponse {
+                        ok: false,
+                        data: json!({ "error": format!("failed to load config: {e}") }),
+                        events: Vec::new(),
+                    };
+                }
+            };
+            let new_config = store.config.clone();
+            let new_exec_policy = store.exec_policy_engine();
+
+            // Update the shared config lock so future
+            // ConfigGet / tool_handler reads see the new values.
+            {
+                let mut cfg = state.config.write().await;
+                *cfg = new_config.clone();
+            }
+
+            // Push both the config and the (possibly changed) exec policy
+            // into the live Runtime so the next prompt / thread turn uses
+            // the reloaded state. MCP server connections are NOT refreshed
+            // here — see `Runtime::reload_config_and_policy` for the
+            // rationale and the matching TUI `mcp_restart_required` note.
+            {
+                let mut runtime = state.runtime.lock().await;
+                runtime.reload_config_and_policy(new_config, new_exec_policy);
+            }
+
+            AppResponse {
+                ok: true,
+                data: json!({ "reloaded": true }),
                 events: Vec::new(),
             }
         }
@@ -1219,6 +1295,218 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn config_reload_refreshes_runtime_config_and_exec_policy_from_disk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "api_key = \"sk-deepseek-secret\"\nmodel = \"deepseek-chat\"\n",
+        )
+        .expect("write config");
+        // No permissions.toml at startup → exec_policy starts empty.
+        let state = build_state(Some(config_path.clone()), None).expect("state");
+
+        // Sanity: initial runtime sees the on-disk model and has no rule.
+        {
+            let runtime = state.runtime.lock().await;
+            assert_eq!(runtime.config.model.as_deref(), Some("deepseek-chat"));
+            let decision = runtime
+                .exec_policy
+                .check(codewhale_execpolicy::ExecPolicyContext {
+                    command: "cargo test",
+                    cwd: "/workspace",
+                    tool: Some("exec_shell"),
+                    path: None,
+                    ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
+                    sandbox_mode: Some("workspace-write"),
+                })
+                .expect("policy check");
+            assert!(decision.matched_rule.is_none());
+        }
+
+        // Edit both files on disk: new model + a permission rule.
+        fs::write(
+            &config_path,
+            "api_key = \"sk-deepseek-secret\"\nmodel = \"deepseek-reasoner\"\n",
+        )
+        .expect("rewrite config");
+        fs::write(
+            tmp.path().join("permissions.toml"),
+            r#"
+            [[rules]]
+            tool = "exec_shell"
+            command = "cargo test"
+            "#,
+        )
+        .expect("write permissions");
+
+        // ConfigReload must re-read both files and push them into the
+        // live Runtime without a restart.
+        let response =
+            process_app_request(&state, AppRequest::ConfigReload, AppTransport::Stdio).await;
+        assert!(response.ok, "reload should succeed");
+        assert_eq!(response.data["reloaded"], true);
+
+        // The shared config lock reflects the new model.
+        {
+            let cfg = state.config.read().await;
+            assert_eq!(cfg.model.as_deref(), Some("deepseek-reasoner"));
+        }
+        // The live Runtime reflects both the new model and the new rule.
+        {
+            let runtime = state.runtime.lock().await;
+            assert_eq!(runtime.config.model.as_deref(), Some("deepseek-reasoner"));
+            let decision = runtime
+                .exec_policy
+                .check(codewhale_execpolicy::ExecPolicyContext {
+                    command: "cargo test --workspace",
+                    cwd: "/workspace",
+                    tool: Some("exec_shell"),
+                    path: None,
+                    ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
+                    sandbox_mode: Some("workspace-write"),
+                })
+                .expect("policy check");
+            assert!(decision.allow);
+            assert!(decision.requires_approval);
+            assert_eq!(
+                decision.matched_rule.as_deref(),
+                Some("tool=exec_shell command=cargo test")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn config_set_propagates_to_runtime_config_without_touching_exec_policy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "api_key = \"sk-deepseek-secret\"\nmodel = \"deepseek-chat\"\n",
+        )
+        .expect("write config");
+        let state = build_state(Some(config_path.clone()), None).expect("state");
+
+        // Set a new model via the API. Only config.toml is touched; no
+        // permissions.toml exists, so exec_policy must stay empty.
+        let response = process_app_request(
+            &state,
+            AppRequest::ConfigSet {
+                key: "model".to_string(),
+                value: "deepseek-reasoner".to_string(),
+            },
+            AppTransport::Stdio,
+        )
+        .await;
+        assert!(response.ok, "set should succeed");
+
+        // Live runtime sees the new model.
+        {
+            let runtime = state.runtime.lock().await;
+            assert_eq!(runtime.config.model.as_deref(), Some("deepseek-reasoner"));
+            // exec_policy was empty at startup and must remain empty.
+            let decision = runtime
+                .exec_policy
+                .check(codewhale_execpolicy::ExecPolicyContext {
+                    command: "cargo test",
+                    cwd: "/workspace",
+                    tool: Some("exec_shell"),
+                    path: None,
+                    ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
+                    sandbox_mode: Some("workspace-write"),
+                })
+                .expect("policy check");
+            assert!(decision.matched_rule.is_none());
+        }
+        // The on-disk file was persisted.
+        let persisted = fs::read_to_string(&config_path).expect("read config");
+        assert!(persisted.contains("deepseek-reasoner"));
+    }
+
+    #[tokio::test]
+    async fn config_unset_propagates_to_runtime_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "api_key = \"sk-deepseek-secret\"\nmodel = \"deepseek-chat\"\n",
+        )
+        .expect("write config");
+        let state = build_state(Some(config_path.clone()), None).expect("state");
+
+        // Sanity: runtime starts with the on-disk model.
+        {
+            let runtime = state.runtime.lock().await;
+            assert_eq!(runtime.config.model.as_deref(), Some("deepseek-chat"));
+        }
+
+        // Unset the model via the API. This walks a separate code path
+        // from ConfigSet (unset_value + update_config), so it needs its
+        // own regression coverage.
+        let response = process_app_request(
+            &state,
+            AppRequest::ConfigUnset {
+                key: "model".to_string(),
+            },
+            AppTransport::Stdio,
+        )
+        .await;
+        assert!(response.ok, "unset should succeed");
+
+        // Live runtime sees the cleared model.
+        {
+            let runtime = state.runtime.lock().await;
+            assert!(runtime.config.model.is_none());
+        }
+        // Shared config lock agrees.
+        {
+            let cfg = state.config.read().await;
+            assert!(cfg.model.is_none());
+        }
+        // The on-disk file no longer carries the model value.
+        let persisted = fs::read_to_string(&config_path).expect("read config");
+        assert!(!persisted.contains("deepseek-chat"));
+    }
+
+    #[tokio::test]
+    async fn config_reload_returns_error_when_disk_config_is_invalid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "api_key = \"sk-deepseek-secret\"\nmodel = \"deepseek-chat\"\n",
+        )
+        .expect("write config");
+        let state = build_state(Some(config_path.clone()), None).expect("state");
+
+        // Corrupt the on-disk config so ConfigStore::load fails to parse.
+        fs::write(&config_path, "api_key = \"unterminated\n").expect("corrupt config");
+
+        let response =
+            process_app_request(&state, AppRequest::ConfigReload, AppTransport::Stdio).await;
+        assert!(!response.ok, "reload of corrupt config must fail");
+        let err = response.data["error"]
+            .as_str()
+            .expect("error message present")
+            .to_string();
+        assert!(
+            err.contains("failed to load config"),
+            "error should mention load failure, got: {err}"
+        );
+
+        // Live state is untouched: the early-return on load error must
+        // not have clobbered runtime.config or state.config.
+        {
+            let runtime = state.runtime.lock().await;
+            assert_eq!(runtime.config.model.as_deref(), Some("deepseek-chat"));
+        }
+        {
+            let cfg = state.config.read().await;
+            assert_eq!(cfg.model.as_deref(), Some("deepseek-chat"));
+        }
+    }
+
     #[test]
     fn non_loopback_bind_without_auth_fails_fast() {
         let options = AppServerOptions {
@@ -1353,6 +1641,7 @@ mod tests {
         "app/config/set",
         "app/config/unset",
         "app/config/list",
+        "app/config/reload",
         "app/models",
         "app/thread_loaded_list",
         "prompt/capabilities",

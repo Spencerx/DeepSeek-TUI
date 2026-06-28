@@ -67,13 +67,17 @@ use codewhale_protocol::fleet::{
 
 #[derive(Clone)]
 pub struct RuntimeApiState {
-    config: Config,
+    config: Arc<parking_lot::RwLock<Config>>,
     workspace: PathBuf,
     task_manager: SharedTaskManager,
     runtime_threads: SharedRuntimeThreadManager,
     cors_origins: Vec<String>,
     sessions_dir: PathBuf,
-    mcp_config_path: PathBuf,
+    /// Original `--config` path (if any) used to load the initial config.
+    /// Passed to `Config::load` on reload and to persistence helpers so
+    /// GUI-driven config changes target the same file the server was
+    /// started with, instead of falling back to the default discovery.
+    config_path: Option<PathBuf>,
     automations: SharedAutomationManager,
     sub_agent_manager: SharedSubAgentManager,
     runtime_token: Option<String>,
@@ -110,6 +114,10 @@ pub struct RuntimeApiOptions {
     pub mobile: bool,
     /// Show a QR code for the mobile URL in the terminal.
     pub show_qr: bool,
+    /// Original `--config` path used to load the initial config. When
+    /// `Some`, GUI-driven config reloads and persistence target this file
+    /// instead of the default discovery path.
+    pub config_path: Option<PathBuf>,
 }
 
 impl Default for RuntimeApiOptions {
@@ -123,6 +131,7 @@ impl Default for RuntimeApiOptions {
             insecure_no_auth: false,
             mobile: false,
             show_qr: false,
+            config_path: None,
         }
     }
 }
@@ -549,13 +558,13 @@ pub async fn run_http_server(
     });
     let sub_agent_manager = runtime_api_sub_agent_manager(&workspace, options.workers);
     let state = RuntimeApiState {
-        config: config.clone(),
+        config: Arc::new(parking_lot::RwLock::new(config.clone())),
         workspace,
         task_manager,
         runtime_threads,
         cors_origins: options.cors_origins.clone(),
         sessions_dir,
-        mcp_config_path: config.mcp_config_path(),
+        config_path: options.config_path.clone(),
         automations,
         sub_agent_manager,
         runtime_token: runtime_token.clone(),
@@ -695,6 +704,8 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/usage", get(get_usage))
         .route("/v1/snapshots", get(list_snapshots))
         .route("/v1/snapshots/{id}/restore", post(restore_snapshot))
+        .route("/v1/config", get(get_config).post(set_config))
+        .route("/v1/config/reload", post(reload_config))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_runtime_token,
@@ -1490,6 +1501,7 @@ async fn create_task(
         req.model = Some(
             state
                 .config
+                .read()
                 .default_text_model
                 .clone()
                 .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string()),
@@ -1511,6 +1523,7 @@ async fn create_thread(
         req.model = Some(
             state
                 .config
+                .read()
                 .default_text_model
                 .clone()
                 .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string()),
@@ -1810,6 +1823,7 @@ async fn stop_fleet_run(
 fn open_fleet_manager(state: &RuntimeApiState) -> Result<FleetManager, ApiError> {
     let exec_config = state
         .config
+        .read()
         .fleet
         .as_ref()
         .map(|fleet| fleet.exec.clone())
@@ -2039,10 +2053,14 @@ fn fleet_event_label(payload: &FleetWorkerEventPayload) -> String {
 async fn list_skills(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<SkillsResponse>, ApiError> {
-    let skills_dir = resolve_skills_dir(&state.config, &state.workspace);
-    let mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
-        state.config.skills_config().scan_codewhale_only(),
-    );
+    let (skills_dir, mode) = {
+        let config = state.config.read();
+        let skills_dir = resolve_skills_dir(&config, &state.workspace);
+        let mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
+            config.skills_config().scan_codewhale_only(),
+        );
+        (skills_dir, mode)
+    };
     let (registry, directories) =
         discover_skills_for_runtime_api(&state.workspace, &skills_dir, mode);
     let skill_state = state.skill_state.lock().await;
@@ -2070,10 +2088,14 @@ async fn set_skill_enabled(
     Path(name): Path<String>,
     Json(req): Json<SetSkillEnabledRequest>,
 ) -> Result<Json<SetSkillEnabledResponse>, ApiError> {
-    let skills_dir = resolve_skills_dir(&state.config, &state.workspace);
-    let mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
-        state.config.skills_config().scan_codewhale_only(),
-    );
+    let (skills_dir, mode) = {
+        let config = state.config.read();
+        let skills_dir = resolve_skills_dir(&config, &state.workspace);
+        let mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
+            config.skills_config().scan_codewhale_only(),
+        );
+        (skills_dir, mode)
+    };
     let (registry, directories) =
         discover_skills_for_runtime_api(&state.workspace, &skills_dir, mode);
     let exists = registry.list().iter().any(|skill| skill.name == name);
@@ -2175,7 +2197,8 @@ async fn runtime_info(State(state): State<RuntimeApiState>) -> Json<RuntimeInfoR
 async fn list_mcp_servers(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<McpServersResponse>, ApiError> {
-    let config = crate::mcp::load_config_with_workspace(&state.mcp_config_path, &state.workspace)
+    let mcp_config_path = state.config.read().mcp_config_path();
+    let config = crate::mcp::load_config_with_workspace(&mcp_config_path, &state.workspace)
         .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
 
     let mut servers = Vec::new();
@@ -2202,9 +2225,9 @@ async fn list_mcp_tools(
 ) -> Result<Json<McpToolsResponse>, ApiError> {
     let mut pool_guard = state.mcp_pool.lock().await;
     if query.connect && pool_guard.is_none() {
-        let new_pool =
-            McpPool::from_config_path_with_workspace(&state.mcp_config_path, &state.workspace)
-                .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+        let mcp_config_path = state.config.read().mcp_config_path();
+        let new_pool = McpPool::from_config_path_with_workspace(&mcp_config_path, &state.workspace)
+            .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
         pool_guard.replace(new_pool);
     }
 
@@ -2807,6 +2830,7 @@ async fn stream_turn(
     let model = req.model.clone().unwrap_or_else(|| {
         state
             .config
+            .read()
             .default_text_model
             .clone()
             .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string())
@@ -2816,7 +2840,7 @@ async fn stream_turn(
         .clone()
         .unwrap_or_else(|| state.workspace.clone());
     let mode = req.mode.clone().unwrap_or_else(|| "agent".to_string());
-    let allow_shell = req.allow_shell.unwrap_or(state.config.allow_shell());
+    let allow_shell = req.allow_shell.unwrap_or(state.config.read().allow_shell());
     let trust_mode = req.trust_mode.unwrap_or(false);
     let auto_approve = req.auto_approve.unwrap_or(false);
     let prompt = req.prompt;
@@ -3357,6 +3381,332 @@ fn snapshot_entries_for_workspace(
             timestamp: snapshot.timestamp,
         })
         .collect())
+}
+
+// ── Config endpoints ──
+
+/// GUI-relevant config snapshot returned by `GET /v1/config`.
+#[derive(Debug, Clone, Serialize)]
+struct GuiConfigResponse {
+    model: String,
+    provider: String,
+    approval_mode: String,
+    reasoning_effort: String,
+    auto_compact: bool,
+    cost_currency: String,
+    default_mode: String,
+    default_model: String,
+    base_url: String,
+    allow_shell: bool,
+    mcp_config_path: String,
+    subagents_enabled: bool,
+    subagents_max_depth: u32,
+    show_thinking: bool,
+    show_tool_details: bool,
+    locale: String,
+    max_history: usize,
+    prefer_external_pdftotext: bool,
+    workspace_follow_symlinks: bool,
+    calm_mode: bool,
+}
+
+/// Request body for `POST /v1/config` (set a single config key).
+#[derive(Debug, Deserialize)]
+struct SetConfigRequest {
+    key: String,
+    value: String,
+    #[serde(default)]
+    persist: bool,
+}
+
+/// Response for `POST /v1/config` (set a single config key).
+#[derive(Debug, Serialize)]
+struct SetConfigResponse {
+    key: String,
+    value: String,
+    message: String,
+    persisted: bool,
+    requires_reload: bool,
+}
+
+/// Response for `POST /v1/config/reload`.
+#[derive(Debug, Serialize)]
+struct ReloadConfigResponse {
+    message: String,
+}
+
+async fn get_config(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<GuiConfigResponse>, ApiError> {
+    let config = state.config.read();
+    let settings = crate::settings::Settings::load().unwrap_or_default();
+    let mcp_config_path = config.mcp_config_path().display().to_string();
+
+    // Determine effective model: prefer config default, then constant.
+    let model = config
+        .default_text_model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string());
+
+    let provider = config.api_provider().as_str().to_string();
+    let approval_mode = config
+        .approval_policy
+        .as_deref()
+        .unwrap_or("suggest")
+        .to_string();
+    let reasoning_effort = config.reasoning_effort().unwrap_or("auto").to_string();
+    let cost_currency = settings.cost_currency.clone();
+    let default_mode = settings.default_mode.as_str().to_string();
+    let default_model = settings
+        .default_model
+        .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string());
+    let base_url = config.deepseek_base_url().to_string();
+
+    Ok(Json(GuiConfigResponse {
+        model,
+        provider,
+        approval_mode,
+        reasoning_effort,
+        auto_compact: settings.auto_compact,
+        cost_currency,
+        default_mode,
+        default_model,
+        base_url,
+        allow_shell: config.allow_shell(),
+        mcp_config_path,
+        subagents_enabled: config.subagents_enabled(),
+        subagents_max_depth: config.subagent_max_spawn_depth(),
+        show_thinking: settings.show_thinking,
+        show_tool_details: settings.show_tool_details,
+        locale: settings.locale.clone(),
+        max_history: settings.max_input_history,
+        prefer_external_pdftotext: settings.prefer_external_pdftotext,
+        workspace_follow_symlinks: settings.workspace_follow_symlinks,
+        calm_mode: settings.calm_mode,
+    }))
+}
+
+async fn set_config(
+    State(state): State<RuntimeApiState>,
+    Json(req): Json<SetConfigRequest>,
+) -> Result<Json<SetConfigResponse>, ApiError> {
+    use crate::config_persistence;
+
+    let key = req.key.to_lowercase();
+    let value = req.value;
+    let persist = req.persist;
+
+    // All persisted config keys require a reload to take effect in the
+    // runtime (including syncing to active engines). The caller should
+    // POST /v1/config/reload after persisting.
+    let requires_reload = persist;
+
+    // Handle persistence directly via config_persistence.
+    // The runtime's in-memory state is NOT mutated here; the caller
+    // should POST /v1/config/reload after persisting to apply changes.
+    if persist {
+        let config_path = state.config_path.as_deref();
+        let result: anyhow::Result<PathBuf> = match key.as_str() {
+            "model" | "default_model" => config_persistence::persist_root_string_key(
+                config_path,
+                "default_text_model",
+                &value,
+            ),
+            "reasoning_effort" => {
+                config_persistence::persist_root_string_key(config_path, "reasoning_effort", &value)
+            }
+            "approval_mode" | "approval_policy" => {
+                config_persistence::persist_root_string_key(config_path, "approval_policy", &value)
+            }
+            "base_url" => config_persistence::persist_root_string_key(
+                config_path,
+                "deepseek_base_url",
+                &value,
+            ),
+            "provider_url" | "provider_base_url" => {
+                let provider = state.config.read().api_provider();
+                config_persistence::persist_provider_base_url_key(config_path, provider, &value)
+            }
+            "cost_currency" => {
+                let mut settings = crate::settings::Settings::load()
+                    .map_err(|e| ApiError::internal(format!("Failed to load settings: {e}")))?;
+                settings.cost_currency = match value.as_str() {
+                    "cny" | "yuan" | "rmb" => "cny".to_string(),
+                    _ => "usd".to_string(),
+                };
+                settings
+                    .save()
+                    .map_err(|e| ApiError::internal(format!("Failed to save settings: {e}")))?;
+                return Ok(Json(SetConfigResponse {
+                    key,
+                    value,
+                    message: "Config persisted. Call /v1/config/reload to apply.".to_string(),
+                    persisted: true,
+                    requires_reload,
+                }));
+            }
+            "default_mode" => {
+                let mut settings = crate::settings::Settings::load()
+                    .map_err(|e| ApiError::internal(format!("Failed to load settings: {e}")))?;
+                settings.default_mode = crate::tui::app::AppMode::from_setting(&value)
+                    .as_setting()
+                    .into();
+                settings
+                    .save()
+                    .map_err(|e| ApiError::internal(format!("Failed to save settings: {e}")))?;
+                return Ok(Json(SetConfigResponse {
+                    key,
+                    value,
+                    message: "Config persisted. Call /v1/config/reload to apply.".to_string(),
+                    persisted: true,
+                    requires_reload,
+                }));
+            }
+            "auto_compact" => {
+                let mut settings = crate::settings::Settings::load()
+                    .map_err(|e| ApiError::internal(format!("Failed to load settings: {e}")))?;
+                settings.auto_compact = value.parse::<bool>().unwrap_or(true);
+                settings
+                    .save()
+                    .map_err(|e| ApiError::internal(format!("Failed to save settings: {e}")))?;
+                return Ok(Json(SetConfigResponse {
+                    key,
+                    value,
+                    message: "Config persisted. Call /v1/config/reload to apply.".to_string(),
+                    persisted: true,
+                    requires_reload,
+                }));
+            }
+            "allow_shell" => {
+                config_persistence::persist_root_string_key(config_path, "allow_shell", &value)
+            }
+            "mcp_config_path" => {
+                config_persistence::persist_root_string_key(config_path, "mcp_config_path", &value)
+            }
+            "show_thinking"
+            | "show_tool_details"
+            | "calm_mode"
+            | "prefer_external_pdftotext"
+            | "workspace_follow_symlinks" => {
+                let mut settings = crate::settings::Settings::load()
+                    .map_err(|e| ApiError::internal(format!("Failed to load settings: {e}")))?;
+                let bool_val = value.parse::<bool>().unwrap_or(false);
+                match key.as_str() {
+                    "show_thinking" => settings.show_thinking = bool_val,
+                    "show_tool_details" => settings.show_tool_details = bool_val,
+                    "calm_mode" => settings.calm_mode = bool_val,
+                    "prefer_external_pdftotext" => settings.prefer_external_pdftotext = bool_val,
+                    "workspace_follow_symlinks" => settings.workspace_follow_symlinks = bool_val,
+                    _ => {}
+                }
+                settings
+                    .save()
+                    .map_err(|e| ApiError::internal(format!("Failed to save settings: {e}")))?;
+                return Ok(Json(SetConfigResponse {
+                    key,
+                    value,
+                    message: "Config persisted. Call /v1/config/reload to apply.".to_string(),
+                    persisted: true,
+                    requires_reload,
+                }));
+            }
+            "locale" => {
+                let mut settings = crate::settings::Settings::load()
+                    .map_err(|e| ApiError::internal(format!("Failed to load settings: {e}")))?;
+                settings.locale = value.clone();
+                settings
+                    .save()
+                    .map_err(|e| ApiError::internal(format!("Failed to save settings: {e}")))?;
+                return Ok(Json(SetConfigResponse {
+                    key,
+                    value,
+                    message: "Config persisted. Call /v1/config/reload to apply.".to_string(),
+                    persisted: true,
+                    requires_reload,
+                }));
+            }
+            "max_history" => {
+                let mut settings = crate::settings::Settings::load()
+                    .map_err(|e| ApiError::internal(format!("Failed to load settings: {e}")))?;
+                settings.max_input_history = value.parse::<usize>().map_err(|_| {
+                    ApiError::bad_request(format!(
+                        "Invalid value '{value}' for max_history: expected a non-negative integer"
+                    ))
+                })?;
+                settings
+                    .save()
+                    .map_err(|e| ApiError::internal(format!("Failed to save settings: {e}")))?;
+                return Ok(Json(SetConfigResponse {
+                    key,
+                    value,
+                    message: "Config persisted. Call /v1/config/reload to apply.".to_string(),
+                    persisted: true,
+                    requires_reload,
+                }));
+            }
+            "subagents_enabled" => {
+                let enabled = value.parse::<bool>().map_err(|_| {
+                    ApiError::bad_request(format!(
+                        "Invalid value '{value}' for subagents_enabled: expected 'true' or 'false'"
+                    ))
+                })?;
+                config_persistence::persist_subagents_bool_key(config_path, "enabled", enabled)
+            }
+            "subagents_max_depth" => {
+                let raw = value.parse::<u64>().map_err(|_| {
+                    ApiError::bad_request(format!(
+                        "Invalid value '{value}' for subagents_max_depth: expected a non-negative integer"
+                    ))
+                })?;
+                let clamped = raw.min(u64::from(codewhale_config::MAX_SPAWN_DEPTH_CEILING));
+                config_persistence::persist_subagents_integer_key(config_path, "max_depth", clamped)
+            }
+            _ => {
+                return Err(ApiError::bad_request(format!(
+                    "Unknown config key '{key}'. Supported keys: model, default_model, reasoning_effort, approval_mode, base_url, provider_url, cost_currency, default_mode, auto_compact, allow_shell, mcp_config_path, show_thinking, show_tool_details, locale, max_history, calm_mode, prefer_external_pdftotext, workspace_follow_symlinks, subagents_enabled, subagents_max_depth"
+                )));
+            }
+        };
+
+        if let Err(e) = result {
+            return Err(ApiError::internal(format!(
+                "Failed to persist config key '{key}': {e}"
+            )));
+        }
+    }
+
+    Ok(Json(SetConfigResponse {
+        key,
+        value,
+        message: if persist {
+            "Config persisted. Call /v1/config/reload to apply.".to_string()
+        } else {
+            "Config not persisted (add persist: true to save)".to_string()
+        },
+        persisted: persist,
+        requires_reload,
+    }))
+}
+
+async fn reload_config(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<ReloadConfigResponse>, ApiError> {
+    let reloaded = Config::load(state.config_path.clone(), None)
+        .map_err(|e| ApiError::internal(format!("Failed to reload config: {e}")))?;
+    {
+        let mut config = state.config.write();
+        *config = reloaded;
+    }
+    // Propagate config to RuntimeThreadManager so model routing uses the new values.
+    state
+        .runtime_threads
+        .reload_config(state.config.read().clone());
+    // Sync running engines with the new config (model, compaction, timeouts, subagent settings).
+    state.runtime_threads.sync_engines_with_config().await;
+    Ok(Json(ReloadConfigResponse {
+        message: "Config reloaded from disk, propagated to runtime and synced to active engines"
+            .to_string(),
+    }))
 }
 
 const MOBILE_HTML: &str = include_str!("runtime_mobile.html");

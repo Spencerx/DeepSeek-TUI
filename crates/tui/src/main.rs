@@ -1337,6 +1337,7 @@ async fn main() -> Result<()> {
                             insecure_no_auth: args.insecure_no_auth,
                             mobile: args.mobile,
                             show_qr: args.qr,
+                            config_path: cli.config.clone(),
                         },
                     )
                     .await
