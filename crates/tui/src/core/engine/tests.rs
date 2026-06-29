@@ -1442,6 +1442,46 @@ fn tool_exec_outcome_tracks_duration() {
 }
 
 #[test]
+fn approval_stamp_makes_user_approval_model_visible() {
+    let mut result = ToolResult::success("stdout");
+
+    stamp_tool_result_approval(&mut result, ToolApprovalStamp::ApprovedByUser);
+
+    assert!(
+        result
+            .content
+            .starts_with("[approval] This tool call required approval"),
+        "{}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("approved by the user before execution")
+    );
+    assert!(result.content.ends_with("stdout"));
+
+    let metadata = result.metadata.expect("approval metadata");
+    assert_eq!(metadata["approval"]["required"], true);
+    assert_eq!(metadata["approval"]["decision"], "approved_by_user");
+    assert_eq!(metadata["approval"]["model_visible"], true);
+}
+
+#[test]
+fn approval_stamp_preserves_existing_metadata() {
+    let mut result = ToolResult::success("ok").with_metadata(json!({
+        "summary": "kept"
+    }));
+
+    stamp_tool_result_approval(&mut result, ToolApprovalStamp::ApprovedWithPolicy);
+
+    let metadata = result.metadata.expect("metadata");
+    assert_eq!(metadata["summary"], "kept");
+    assert_eq!(metadata["approval"]["decision"], "approved_with_policy");
+    assert!(result.content.contains("adjusted execution policy"));
+}
+
+#[test]
 fn core_native_tools_stay_loaded_in_yolo_mode() {
     let always_load = HashSet::new();
     assert!(!should_default_defer_tool("exec_shell", &always_load));

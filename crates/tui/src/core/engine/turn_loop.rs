@@ -2247,10 +2247,11 @@ impl Engine {
                             continue;
                         }
 
-                        // Handle approval flow: returns (result_override, context_override)
-                        let (result_override, context_override): (
+                        // Handle approval flow: returns (result_override, context_override, approval_stamp)
+                        let (result_override, context_override, approval_stamp): (
                             Option<Result<ToolResult, ToolError>>,
                             Option<crate::tools::ToolContext>,
+                            Option<ToolApprovalStamp>,
                         ) = if plan.approval_required {
                             emit_tool_audit(json!({
                                 "event": "tool.approval_required",
@@ -2295,7 +2296,7 @@ impl Engine {
                                         "decision": "approved",
                                         "caller": caller_type_for_tool_use(tool_caller.as_ref()),
                                     }));
-                                    (None, None)
+                                    (None, None, Some(ToolApprovalStamp::ApprovedByUser))
                                 }
                                 Ok(ApprovalResult::Denied) => {
                                     emit_tool_audit(json!({
@@ -2309,6 +2310,7 @@ impl Engine {
                                         Some(Err(ToolError::permission_denied(format!(
                                             "Tool '{tool_name}' denied by user"
                                         )))),
+                                        None,
                                         None,
                                     )
                                 }
@@ -2324,12 +2326,16 @@ impl Engine {
                                     let elevated_context = tool_registry.map(|r| {
                                         r.context().clone().with_elevated_sandbox_policy(policy)
                                     });
-                                    (None, elevated_context)
+                                    (
+                                        None,
+                                        elevated_context,
+                                        Some(ToolApprovalStamp::ApprovedWithPolicy),
+                                    )
                                 }
-                                Err(err) => (Some(Err(err)), None),
+                                Err(err) => (Some(Err(err)), None, None),
                             }
                         } else {
-                            (None, None)
+                            (None, None, None)
                         };
 
                         // Per-tool snapshot for surgical undo (#384): capture workspace
@@ -2368,6 +2374,12 @@ impl Engine {
                             )
                             .await
                         };
+
+                        if let Some(approval_stamp) = approval_stamp
+                            && let Ok(tool_result) = result.as_mut()
+                        {
+                            stamp_tool_result_approval(tool_result, approval_stamp);
+                        }
 
                         // #500: spill outsized tool outputs to disk before the
                         // result fans out to the model context and the UI cell.

@@ -1153,7 +1153,7 @@ impl Engine {
                             "decision": "approved",
                             "source": "composer_bang",
                         }));
-                        Self::execute_tool_with_lock(
+                        let mut result = Self::execute_tool_with_lock(
                             self.tool_exec_lock.clone(),
                             spec.supports_parallel(),
                             false,
@@ -1165,7 +1165,14 @@ impl Engine {
                             None,
                             None,
                         )
-                        .await
+                        .await;
+                        if let Ok(tool_result) = result.as_mut() {
+                            stamp_tool_result_approval(
+                                tool_result,
+                                ToolApprovalStamp::ApprovedByUser,
+                            );
+                        }
+                        result
                     }
                     Ok(ApprovalResult::Denied) => {
                         emit_tool_audit(json!({
@@ -1192,7 +1199,7 @@ impl Engine {
                             .context()
                             .clone()
                             .with_elevated_sandbox_policy(policy);
-                        Self::execute_tool_with_lock(
+                        let mut result = Self::execute_tool_with_lock(
                             self.tool_exec_lock.clone(),
                             spec.supports_parallel(),
                             false,
@@ -1204,7 +1211,14 @@ impl Engine {
                             None,
                             Some(elevated_context),
                         )
-                        .await
+                        .await;
+                        if let Ok(tool_result) = result.as_mut() {
+                            stamp_tool_result_approval(
+                                tool_result,
+                                ToolApprovalStamp::ApprovedWithPolicy,
+                            );
+                        }
+                        result
                     }
                     Err(err) => Err(err),
                 }
@@ -3874,12 +3888,13 @@ use self::approval::{ApprovalDecision, ApprovalResult, UserInputDecision};
 #[cfg(test)]
 use self::dispatch::should_parallelize_tool_batch;
 use self::dispatch::{
-    ParallelToolResult, ParallelToolResultEntry, ToolExecGuard, ToolExecOutcome,
+    ParallelToolResult, ParallelToolResultEntry, ToolApprovalStamp, ToolExecGuard, ToolExecOutcome,
     ToolExecutionBatch, ToolExecutionPlan, caller_allowed_for_tool, caller_type_for_tool_use,
     final_tool_input, format_tool_error, malformed_tool_arguments_error,
     malformed_tool_arguments_input, mcp_tool_approval_description, mcp_tool_is_parallel_safe,
     mcp_tool_is_read_only, parse_parallel_tool_calls, parse_tool_input,
     plan_tool_execution_batches, should_force_update_plan_first, should_stop_after_plan_tool,
+    stamp_tool_result_approval,
 };
 #[cfg(test)]
 use self::lsp_hooks::edited_paths_for_tool;

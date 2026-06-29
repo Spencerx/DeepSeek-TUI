@@ -72,6 +72,60 @@ pub(super) struct ParallelToolResult {
     pub(super) results: Vec<ParallelToolResultEntry>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToolApprovalStamp {
+    ApprovedByUser,
+    ApprovedWithPolicy,
+}
+
+impl ToolApprovalStamp {
+    fn decision(self) -> &'static str {
+        match self {
+            Self::ApprovedByUser => "approved_by_user",
+            Self::ApprovedWithPolicy => "approved_with_policy",
+        }
+    }
+
+    fn model_visible_note(self) -> &'static str {
+        match self {
+            Self::ApprovedByUser => {
+                "[approval] This tool call required approval and was approved by the user before execution."
+            }
+            Self::ApprovedWithPolicy => {
+                "[approval] This tool call required approval and was approved by the user with an adjusted execution policy before execution."
+            }
+        }
+    }
+}
+
+pub(super) fn stamp_tool_result_approval(result: &mut ToolResult, approval: ToolApprovalStamp) {
+    let approval_metadata = json!({
+        "required": true,
+        "decision": approval.decision(),
+        "model_visible": true,
+    });
+    let metadata = result.metadata.get_or_insert_with(|| json!({}));
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("approval".to_string(), approval_metadata);
+    } else {
+        let prior = std::mem::replace(metadata, json!({}));
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert("_prior".to_string(), prior);
+            object.insert("approval".to_string(), approval_metadata);
+        }
+    }
+
+    let note = approval.model_visible_note();
+    if result.content.starts_with("[approval] ") {
+        return;
+    }
+    if result.content.is_empty() {
+        result.content = note.to_string();
+    } else {
+        result.content = format!("{note}\n\n{}", result.content);
+    }
+}
+
 // Hold the lock guard for the duration of a tool execution.
 // The inner guards are held for RAII purposes (dropped when the guard is dropped).
 pub(super) enum ToolExecGuard<'a> {
