@@ -2253,6 +2253,33 @@ async fn apply_loaded_session_resets_workspace_runtime_state() {
 }
 
 #[test]
+fn shell_live_output_refresh_does_not_block_on_contended_lock() {
+    // #3804: the async UI loop must never block on the shell manager's
+    // std::sync Mutex. While the lock is held, the render-only live-output
+    // refresh must return immediately via try_lock — the previous blocking
+    // lock() would deadlock on this same thread, so reaching the assert at all
+    // proves the path no longer blocks under contention.
+    let mut app = create_test_app();
+    let shell_mgr = app
+        .runtime_services
+        .shell_manager
+        .as_ref()
+        .expect("shell manager")
+        .clone();
+
+    let guard = shell_mgr.lock().expect("hold shell lock");
+    let changed = refresh_shell_exec_live_output(&mut app);
+    assert!(
+        !changed,
+        "contended live-output refresh should skip this frame, not block or update"
+    );
+    drop(guard);
+
+    // With the lock free again the path runs normally (no jobs → no change).
+    assert!(!refresh_shell_exec_live_output(&mut app));
+}
+
+#[test]
 fn apply_loaded_session_updates_current_workspace_display() {
     let mut app = create_test_app();
     let config = Config::default();

@@ -1429,26 +1429,42 @@ async fn refresh_active_task_panel(app: &mut App, task_manager: &SharedTaskManag
     entries.extend(active_reasoning_task_entries(app));
     entries.extend(active_rlm_task_entries(app));
 
-    if let Some(shell_mgr) = app.runtime_services.shell_manager.as_ref()
-        && let Ok(mut mgr) = shell_mgr.lock()
-    {
-        for job in mgr.list_jobs() {
-            if !matches!(job.status, crate::tools::shell::ShellStatus::Running) {
-                continue;
-            }
-            entries.push(TaskPanelEntry {
-                id: job.id,
-                status: "running".to_string(),
-                prompt_summary: format!("shell: {}", job.command),
-                duration_ms: Some(job.elapsed_ms),
-                kind: TaskPanelEntryKind::Background,
-                stale: job.stale,
-                elapsed_since_output_ms: job.elapsed_since_output_ms,
-                owner_agent_id: job.owner_agent_id,
-                owner_agent_name: job.owner_agent_name,
-            });
-        }
-    }
+    // #3804: this is a render-only read of shell jobs and must not block the
+    // async UI loop on the shell manager's std::sync Mutex. Use try_lock; on
+    // contention, retain the previous frame's background shell entries so
+    // running shells don't flicker out of the Work panel. Shell ownership,
+    // cancellation, approval state, and output capture never depend on this
+    // refresh succeeding.
+    let prev_shell_entries: Vec<TaskPanelEntry> = app
+        .task_panel
+        .iter()
+        .filter(|entry| matches!(entry.kind, TaskPanelEntryKind::Background))
+        .cloned()
+        .collect();
+    let shell_entries: Vec<TaskPanelEntry> = match app.runtime_services.shell_manager.as_ref() {
+        Some(shell_mgr) => match shell_mgr.try_lock() {
+            Ok(mut mgr) => mgr
+                .list_jobs()
+                .into_iter()
+                .filter(|job| matches!(job.status, crate::tools::shell::ShellStatus::Running))
+                .map(|job| TaskPanelEntry {
+                    id: job.id,
+                    status: "running".to_string(),
+                    prompt_summary: format!("shell: {}", job.command),
+                    duration_ms: Some(job.elapsed_ms),
+                    kind: TaskPanelEntryKind::Background,
+                    stale: job.stale,
+                    elapsed_since_output_ms: job.elapsed_since_output_ms,
+                    owner_agent_id: job.owner_agent_id,
+                    owner_agent_name: job.owner_agent_name,
+                })
+                .collect(),
+            // Contended: keep the last known snapshot rather than blocking.
+            Err(_) => prev_shell_entries,
+        },
+        None => Vec::new(),
+    };
+    entries.extend(shell_entries);
 
     app.task_panel = entries;
 }
@@ -1457,8 +1473,11 @@ fn refresh_shell_exec_live_output(app: &mut App) -> bool {
     let Some(shell_mgr) = app.runtime_services.shell_manager.as_ref().cloned() else {
         return false;
     };
+    // #3804: render-only read — try_lock so a contended shell Mutex can never
+    // block the async UI loop; skip this frame's live-output update on
+    // contention (the next refresh picks it up).
     let jobs = {
-        let Ok(mut mgr) = shell_mgr.lock() else {
+        let Ok(mut mgr) = shell_mgr.try_lock() else {
             return false;
         };
         mgr.list_jobs()
