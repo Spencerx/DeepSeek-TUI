@@ -2200,7 +2200,11 @@ mod tests {
             notes_path: PathBuf::from("notes.txt"),
             mcp_config_path: PathBuf::from("mcp.json"),
             use_memory: false,
-            start_in_agent_mode: false,
+            // Keep command tests independent from the developer's saved
+            // `default_mode` setting: with `false`, App::new starts in the
+            // saved mode, so a machine with `default_mode = "yolo"` flips
+            // `allow_shell` on and breaks the allow_shell assertions.
+            start_in_agent_mode: true,
             skip_onboarding: false,
             yolo: false,
             resume_session_id: None,
