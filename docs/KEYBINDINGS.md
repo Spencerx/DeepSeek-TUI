@@ -144,9 +144,9 @@ When `[memory] enabled = true`, typing `# foo` and pressing `Enter` appends `foo
 
 | Chord                | Action                                              |
 |----------------------|-----------------------------------------------------|
-| `Enter`              | Advance to next step (Welcome → Language → API → …) |
+| `Enter`              | Advance to next step (Welcome → Language → API/trust gates → setup checkpoint) |
 | `Esc`                | Step back one screen                                |
-| `1`–`5`              | Pick a language (Language step)                    |
+| `1`–`7`              | Pick a language (Language step)                    |
 | `y` / `Y`            | Trust the workspace (Trust step)                   |
 | `n` / `N`            | Skip the trust prompt                              |
 

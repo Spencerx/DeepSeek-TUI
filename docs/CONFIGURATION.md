@@ -28,6 +28,11 @@ controls do not blur together.
 - **Memory and handoffs** — recalled state. Useful, but lower authority than
   constitutions and project instructions.
 
+Release verification for these surfaces lives in
+[`docs/evidence/v0867-constitution-setup-qa-matrix.md`](evidence/v0867-constitution-setup-qa-matrix.md).
+Use it when checking `/setup`, `/constitution`, doctor, context reports, and
+the update checkpoint agree.
+
 Each repo can carry two distinct, complementary files:
 
 - **`AGENTS.md`** — ordinary project working instructions.
