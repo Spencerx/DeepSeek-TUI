@@ -340,6 +340,7 @@ struct GuidedConstitutionDraft {
     evidence: GuidedEvidence,
     communication: GuidedCommunication,
     privacy: GuidedPrivacy,
+    principles: GuidedPrinciples,
 }
 
 impl Default for GuidedConstitutionDraft {
@@ -350,6 +351,7 @@ impl Default for GuidedConstitutionDraft {
             evidence: GuidedEvidence::TestsAndReceipts,
             communication: GuidedCommunication::Concise,
             privacy: GuidedPrivacy::StandardCare,
+            principles: GuidedPrinciples::ScopedChanges,
         }
     }
 }
@@ -362,6 +364,7 @@ impl GuidedConstitutionDraft {
             '3' => self.evidence = self.evidence.next(),
             '4' => self.communication = self.communication.next(),
             '5' => self.privacy = self.privacy.next(),
+            '6' => self.principles = self.principles.next(),
             _ => return false,
         }
         true
@@ -391,20 +394,24 @@ impl GuidedConstitutionDraft {
     fn notes(self, locale: Locale) -> String {
         match locale {
             Locale::ZhHans => format!(
-                "引导式答案：用途={}；主动性={}；证据={}；沟通={}；隐私={}。自由文本只作为建议，不会改变审批、沙箱、Shell、网络、信任或 MCP 权限。",
+                "引导式答案：用途={}；主动性={}；证据={}；沟通={}；隐私={}；原则={}。{} 自由文本原则只作为建议，不会改变审批、沙箱、Shell、网络、信任或 MCP 权限。",
                 self.purpose.label(locale),
                 autonomy_label(self.autonomy, locale),
                 self.evidence.label(locale),
                 self.communication.label(locale),
-                self.privacy.label(locale)
+                self.privacy.label(locale),
+                self.principles.label(locale),
+                self.principles.note(locale)
             ),
             _ => format!(
-                "Guided answers: purpose={}; initiative={}; evidence={}; communication={}; privacy={}. Freeform principles are advisory and do not change approval, sandbox, shell, network, trust, or MCP permissions.",
+                "Guided answers: purpose={}; initiative={}; evidence={}; communication={}; privacy={}; principles={}. {} Freeform principles are advisory and do not change approval, sandbox, shell, network, trust, or MCP permissions.",
                 self.purpose.label(locale),
                 autonomy_label(self.autonomy, locale),
                 self.evidence.label(locale),
                 self.communication.label(locale),
-                self.privacy.label(locale)
+                self.privacy.label(locale),
+                self.principles.label(locale),
+                self.principles.note(locale)
             ),
         }
     }
@@ -655,6 +662,57 @@ impl GuidedPrivacy {
             }
             (_, Self::ProjectLocal) => {
                 "Confirm before carrying project details across memory, workspaces, or stale handoffs."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuidedPrinciples {
+    ScopedChanges,
+    UserVoice,
+    ReversibleOps,
+}
+
+impl GuidedPrinciples {
+    fn next(self) -> Self {
+        match self {
+            Self::ScopedChanges => Self::UserVoice,
+            Self::UserVoice => Self::ReversibleOps,
+            Self::ReversibleOps => Self::ScopedChanges,
+        }
+    }
+
+    fn label(self, locale: Locale) -> &'static str {
+        match (locale, self) {
+            (Locale::ZhHans, Self::ScopedChanges) => "小范围改动",
+            (Locale::ZhHans, Self::UserVoice) => "保留用户语气",
+            (Locale::ZhHans, Self::ReversibleOps) => "可逆步骤",
+            (_, Self::ScopedChanges) => "scoped changes",
+            (_, Self::UserVoice) => "user voice",
+            (_, Self::ReversibleOps) => "reversible steps",
+        }
+    }
+
+    fn note(self, locale: Locale) -> &'static str {
+        match (locale, self) {
+            (Locale::ZhHans, Self::ScopedChanges) => {
+                "自由原则：优先采用小范围、可审查的改动；除非明确要求，不做无关重构。"
+            }
+            (Locale::ZhHans, Self::UserVoice) => {
+                "自由原则：保留用户的语气、品牌和约束；不把偏好推断成权限扩大。"
+            }
+            (Locale::ZhHans, Self::ReversibleOps) => {
+                "自由原则：先选择可逆步骤、检查点和回滚说明，再进行高影响操作。"
+            }
+            (_, Self::ScopedChanges) => {
+                "Freeform principle: prefer small, reviewable changes and avoid unrelated refactors unless explicitly requested."
+            }
+            (_, Self::UserVoice) => {
+                "Freeform principle: preserve the user's voice, brand, and constraints without treating preferences as permission expansion."
+            }
+            (_, Self::ReversibleOps) => {
+                "Freeform principle: favor reversible steps, checkpoints, and rollback notes before high-impact operations."
             }
         }
     }
@@ -1018,7 +1076,7 @@ impl ModalView for SetupWizardView {
             KeyCode::Char('g') if self.selected_step() == SetupStep::Constitution => {
                 self.commit_guided_constitution()
             }
-            KeyCode::Char(key @ ('1' | '2' | '3' | '4' | '5'))
+            KeyCode::Char(key @ ('1' | '2' | '3' | '4' | '5' | '6'))
                 if self.selected_step() == SetupStep::Constitution =>
             {
                 self.cycle_guided_answer(key)
@@ -1087,7 +1145,7 @@ impl ModalView for SetupWizardView {
         ];
         if self.selected_step() == SetupStep::Constitution {
             hints.push(ActionHint::new(
-                "1-5",
+                "1-6",
                 tr(self.locale, MessageId::SetupActionTuneGuided).to_string(),
             ));
             hints.push(ActionHint::new(
@@ -1247,6 +1305,11 @@ impl SetupWizardView {
                 "5",
                 MessageId::SetupConstitutionPrivacyLabel,
                 self.guided_draft.privacy.label(self.locale),
+            ),
+            self.guided_answer_single(
+                "6",
+                MessageId::SetupConstitutionPrinciplesLabel,
+                self.guided_draft.principles.label(self.locale),
             ),
             Line::from(Span::styled(
                 tr(self.locale, MessageId::SetupConstitutionGuidedHint).to_string(),
@@ -1726,7 +1789,7 @@ mod tests {
     #[test]
     fn guided_constitution_answers_shape_preview_and_saved_payload() {
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
-        for key_char in ['1', '2', '3', '4', '5'] {
+        for key_char in ['1', '2', '3', '4', '5', '6'] {
             assert!(matches!(
                 view.handle_key(key(KeyCode::Char(key_char))),
                 ViewAction::None
@@ -1743,6 +1806,8 @@ mod tests {
         assert!(content.contains("release evidence"));
         assert!(content.contains("learn the system"));
         assert!(content.contains("sensitive data"));
+        assert!(content.contains("user voice"));
+        assert!(content.contains("preserve the user's voice"));
 
         let action = view.handle_key(key(KeyCode::Char('g')));
 
@@ -1763,6 +1828,7 @@ mod tests {
         assert!(body.contains("release evidence"));
         assert!(body.contains("learn the system"));
         assert!(body.contains("sensitive data"));
+        assert!(body.contains("preserve the user's voice"));
         assert_eq!(
             state.constitution_preview_hash.as_deref(),
             Some(constitution.preview_hash().as_str())
@@ -1780,7 +1846,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            view.handle_key(key(KeyCode::Char('2'))),
+            view.handle_key(key(KeyCode::Char('6'))),
             ViewAction::None
         ));
         let second_preview = view.handle_key(key(KeyCode::Char('g')));
@@ -1788,7 +1854,7 @@ mod tests {
         let ViewAction::Emit(ViewEvent::OpenTextPager { content, .. }) = second_preview else {
             panic!("changed guided answer should preview again before saving");
         };
-        assert!(content.contains("ambitious initiative"));
+        assert!(content.contains("preserve the user's voice"));
 
         let action = view.handle_key(key(KeyCode::Char('g')));
         let ViewAction::EmitAndClose(ViewEvent::SetupConstitutionCommitRequested {
@@ -1800,7 +1866,12 @@ mod tests {
         };
         assert_eq!(
             constitution.autonomy_preference,
-            AutonomyPreference::Autonomous
+            AutonomyPreference::Balanced
+        );
+        assert!(
+            constitution
+                .render_body()
+                .contains("preserve the user's voice")
         );
     }
 
@@ -1837,6 +1908,8 @@ mod tests {
         assert!(english_text.contains("coding workbench"));
         assert!(english_text.contains("Initiative:"));
         assert!(english_text.contains("balanced"));
+        assert!(english_text.contains("Principles:"));
+        assert!(english_text.contains("scoped changes"));
 
         let zh_hans = SetupWizardView::new(SetupState::default(), Locale::ZhHans);
         let zh_hans_text = lines_to_text(zh_hans.constitution_detail_lines());
@@ -1844,6 +1917,8 @@ mod tests {
         assert!(zh_hans_text.contains("编码工作台"));
         assert!(zh_hans_text.contains("主动性："));
         assert!(zh_hans_text.contains("平衡"));
+        assert!(zh_hans_text.contains("原则："));
+        assert!(zh_hans_text.contains("小范围改动"));
     }
 
     #[test]
