@@ -185,6 +185,9 @@ pub fn reset_for_tests() {
 /// Look up (or compute) the wrapped output rows for `output` at `width`.
 /// On a hit the cached `Vec<OutputRow>` is cloned without re-running
 /// the per-line ANSI strip or the wrap pass.
+/// String-keyed convenience over [`get_or_compute_rows_with_hash`]. Only the
+/// tests use it now that production callers hash once and pass the hash.
+#[cfg(test)]
 pub fn get_or_compute_rows<F>(output: &str, width: u16, compute: F) -> Vec<OutputRow>
 where
     F: FnOnce() -> Vec<OutputRow>,
