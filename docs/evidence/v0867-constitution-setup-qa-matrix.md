@@ -7,6 +7,8 @@ checking each surface in isolation.
 
 Current-build automated text/render evidence is recorded in
 `docs/evidence/v0867-constitution-setup-current-build-evidence.md`.
+Guided constitution output examples are recorded in
+`docs/evidence/v0867-guided-constitution-examples.md`.
 
 ## Gate Commands
 
@@ -50,7 +52,12 @@ cargo run -p codewhale-tui --locked -- doctor --context-json | jq '.entries[] | 
 | Scenario | Expected behavior | Evidence |
 | --- | --- | --- |
 | Clean home, bundled/default constitution | First-run can complete by choosing language, recording provider readiness as ready or needs-action, reviewing runtime posture, choosing bundled/default, and opening the setup report. | `/setup` `U` on Constitution step; `crates/tui/src/tui/setup/mod.rs::bundled_constitution_commit_marks_checkpoint_complete`; `doctor --json .setup.constitution.choice == "bundled"` |
-| Clean home, guided user-global constitution | Guided custom save writes `$CODEWHALE_HOME/constitution.json`, records source/validity/hash/version in `setup_state.json`, and previews the rendered block. | `crates/tui/src/tui/setup/mod.rs::guided_constitution_commit_emits_structured_payload`; `persist_user_constitution_choice_writes_constitution_and_state`; `/constitution preview` |
+| Clean home, guided user-global constitution | Guided custom save writes `$CODEWHALE_HOME/constitution.json`, records source/validity/hash/version/authoring in `setup_state.json`, and previews the rendered block before the ratifying second `G`. | `crates/tui/src/tui/setup/mod.rs::guided_constitution_requires_preview_before_save`; `guided_constitution_answers_shape_preview_and_saved_payload`; `deterministic_ratification_records_guided_authoring`; `persist_user_constitution_choice_writes_constitution_and_state`; `/constitution preview` |
+| Model-assisted draft offer gating | The `A` "ask your model to draft" action appears and responds only when the first provider/model route is ready (key/local runtime present); without a ready route the key is inert and the deterministic guided flow is unchanged. | `crates/tui/src/tui/setup/mod.rs::model_draft_key_is_inert_without_a_ready_provider`; `model_draft_key_requests_drafting_with_current_answers`; `constitution_card_gates_the_model_draft_invitation` |
+| Model-assisted draft request payload | The one-shot drafting request carries only the six guided answer labels and the UI language tag — no secrets, env, config, repo contents, or memory — plus injection-resistance and advisory-only guardrails in the system prompt. | `crates/tui/src/tui/setup/model_draft.rs::drafting_request_sends_only_answers_and_language`; `drafting_prompts_carry_the_safety_guardrails` |
+| Model-assisted draft ingestion | Model output is untrusted: fenced/prose-wrapped JSON parses, invalid or empty output is rejected with a reason, oversized fields are bounded before preview/save, unknown (runtime-policy) keys cannot persist, thinking blocks never reach the parser, and constitution-tag forgery is neutralized. | `crates/tui/src/tui/setup/model_draft.rs` ingestion tests; `crates/config/src/user_constitution.rs::untrusted_draft_*` tests |
+| Model-assisted draft failure fallback | Provider construction failure, timeout, request error, or bad JSON degrade to a status line; the deterministic guided draft still previews and ratifies. Decline is the default: not pressing `A` (or tuning `1-6`, which discards a stale draft) keeps the guided path. | `crates/tui/src/tui/ui.rs::handle_setup_constitution_model_draft` error arm; `crates/tui/src/tui/setup/mod.rs::cycling_answers_discards_the_model_draft` |
+| Model-assisted ratification | An installed model draft opens the ratification preview immediately; saving still requires the explicit `G`, records `constitution_authoring = model_drafted` plus the bounded draft's preview hash, and persists through the same single `SetupTransaction`. | `crates/tui/src/tui/setup/mod.rs::installed_model_draft_previews_then_ratifies_with_provenance`; `model_drafted_commit_round_trips_through_the_setup_transaction` |
 | Existing user update checkpoint | If the v0.8.67 checkpoint is incomplete, interactive launch opens `/setup`; choosing bundled/default is a valid completion. | `crates/tui/src/tui/setup/mod.rs::wizard_resumes_at_constitution_checkpoint_when_update_incomplete`; `crates/tui/src/tui/ui/tests.rs::setup_checkpoint_opens_after_onboarding_when_due` |
 | First-run onboarding handoff | Finishing the legacy Welcome/Language/API/trust gates opens setup when the checkpoint is due, instead of landing straight in chat. | `crates/tui/src/tui/ui/tests.rs::setup_checkpoint_opens_after_onboarding_when_due`; onboarding copy tests |
 | Existing valid user-global constitution | `/constitution` reports it as active when setup state does not select bundled/deferred/expert override; prompt assembly injects it as a separate block. | `crates/tui/src/prompts.rs::user_global_constitution_block_is_injected_separately`; `/constitution status` |
@@ -79,7 +86,9 @@ candidate:
    health without secrets.
 3. `/setup` Runtime Posture card says constitution guidance does not change
    runtime policy silently.
-4. `/setup` Constitution step shows bundled/default and guided custom actions.
+4. `/setup` Constitution step shows bundled/default and guided custom actions,
+   and — once the provider route is ready — the `A` model-draft invitation
+   naming the first configured model.
 5. `/constitution` overview shows bundled, user-global, repo-local, AGENTS,
    memory/handoff, preview, and maintenance actions.
 6. `/setup report` or `codewhale doctor --json | jq '.setup'` shows

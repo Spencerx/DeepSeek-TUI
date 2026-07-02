@@ -5,9 +5,16 @@ constitution-first setup lane. It complements
 `docs/evidence/v0867-constitution-setup-qa-matrix.md`; it is not a release
 tag, artifact, or publish record.
 
-- Date: 2026-07-01T07:03:18Z
+Representative guided output examples, including a GLM-5.2-oriented profile,
+are recorded in `docs/evidence/v0867-guided-constitution-examples.md`. As of
+this snapshot the wizard also offers model-assisted drafting: `A` on the
+Constitution step asks the first configured model to draft from the guided
+answers, gated through `UserConstitution::from_untrusted_json`
+(parse/sanitize/bound) and the same ratification preview + explicit `G` save.
+
+- Date: 2026-07-02T03:54:02Z
 - Branch: `claude/v0.8.67-constitution-setup-174rj9`
-- Head: `3509fe291`
+- Head: `fa7c4b055`
 - Workspace version observed in `Cargo.toml`: `0.8.66`
 
 ## Covered Surfaces
@@ -41,13 +48,14 @@ Result: 1 passed, 0 failed.
 cargo test -p codewhale-tui --bin codewhale-tui --locked constitution -- --nocapture
 ```
 
-Result: 41 passed, 0 failed.
+Result: 42 passed, 0 failed.
 
 ```sh
 cargo test -p codewhale-tui --bin codewhale-tui --locked setup -- --nocapture
 ```
 
-Result: 106 passed, 0 failed.
+Result: 127 passed, 0 failed (includes the model-draft request/ingestion,
+ratification, discard-on-tune, and authoring-provenance tests).
 
 ```sh
 cargo test -p codewhale-tui --bin codewhale-tui --locked context_report -- --nocapture
@@ -59,7 +67,14 @@ Result: 10 passed, 0 failed.
 cargo test -p codewhale-tui --bin codewhale-tui --locked doctor_setup -- --nocapture
 ```
 
-Result: 2 passed, 0 failed.
+Result: 5 passed, 0 failed.
+
+```sh
+cargo test -p codewhale-config --lib
+```
+
+Result: 342 passed, 0 failed (includes the `untrusted_draft_*` ingestion-gate
+tests and the `constitution_authoring` round-trip/legacy-load tests).
 
 ```sh
 cargo test -p codewhale-tui --bin codewhale-tui --locked verification_report -- --nocapture
