@@ -124,6 +124,7 @@ const MODEL_CLASSES: [Choice; 6] = [
 #[derive(Debug, Clone)]
 pub struct FleetSetupSnapshot {
     workspace: PathBuf,
+    locale: crate::localization::Locale,
     provider: String,
     model: String,
     reasoning: String,
@@ -159,6 +160,7 @@ impl FleetSetupSnapshot {
 
         Self {
             workspace: app.workspace.clone(),
+            locale: app.ui_locale,
             provider,
             model,
             reasoning: app.reasoning_effort_display_label(),
@@ -193,6 +195,12 @@ pub struct FleetSetupView {
     role_idx: usize,
     model_idx: usize,
     review_scroll: usize,
+    /// A model-drafted profile awaiting ratification (already sanitized and
+    /// bounded by the untrusted gate). Cleared when the selection changes so
+    /// a stale draft can never be ratified against fresh answers.
+    model_draft: Option<Box<crate::fleet::profile::FleetProfileDraft>>,
+    /// Display label of the model that authored `model_draft`.
+    model_draft_label: Option<String>,
 }
 
 impl FleetSetupView {
@@ -208,7 +216,28 @@ impl FleetSetupView {
             role_idx: 0,
             model_idx: 0,
             review_scroll: 0,
+            model_draft: None,
+            model_draft_label: None,
         }
+    }
+
+    /// Install a sanitized, bounded model draft and return the preview the
+    /// host must open in the same breath — that preview is the exact TOML the
+    /// ratify keypress would persist.
+    pub fn install_model_draft(
+        &mut self,
+        draft: Box<crate::fleet::profile::FleetProfileDraft>,
+        model_label: String,
+    ) -> (String, String) {
+        let title = format!("Fleet profile — draft by {model_label} (g ratifies)");
+        let content = format!(
+            "# .codewhale/agents/{}\n# Drafted by {model_label}, validated and bounded by CodeWhale.\n# Permissions stay at the fleet floor: no shell, no trust, approval required.\n# Nothing is saved until you press g in the wizard.\n\n{}",
+            draft.file_name(),
+            draft.render_toml()
+        );
+        self.model_draft = Some(draft);
+        self.model_draft_label = Some(model_label);
+        (title, content)
     }
 
     /// The planner role chosen (drives the profile file name and `role_hint`).
@@ -232,19 +261,33 @@ impl FleetSetupView {
 
     fn move_up(&mut self) {
         match self.step {
-            Step::Role => self.role_idx = self.role_idx.saturating_sub(1),
-            Step::Model => self.model_idx = self.model_idx.saturating_sub(1),
+            Step::Role => {
+                self.role_idx = self.role_idx.saturating_sub(1);
+                self.discard_model_draft();
+            }
+            Step::Model => {
+                self.model_idx = self.model_idx.saturating_sub(1);
+                self.discard_model_draft();
+            }
             Step::Review => self.review_scroll = self.review_scroll.saturating_sub(1),
         }
+    }
+
+    /// A draft is only valid for the answers it was requested against.
+    fn discard_model_draft(&mut self) {
+        self.model_draft = None;
+        self.model_draft_label = None;
     }
 
     fn move_down(&mut self) {
         match self.step {
             Step::Role => {
                 self.role_idx = (self.role_idx + 1).min(self.step_len().saturating_sub(1));
+                self.discard_model_draft();
             }
             Step::Model => {
                 self.model_idx = (self.model_idx + 1).min(self.step_len().saturating_sub(1));
+                self.discard_model_draft();
             }
             Step::Review => self.review_scroll = self.review_scroll.saturating_add(1),
         }
@@ -317,6 +360,11 @@ impl FleetSetupView {
             Step::Review => {
                 hints.push(ActionHint::new("↑/↓", "scroll"));
                 hints.push(ActionHint::new("Enter", "start"));
+                if self.model_draft.is_some() {
+                    hints.push(ActionHint::new("g", "ratify draft"));
+                } else {
+                    hints.push(ActionHint::new("m", "model draft"));
+                }
                 hints.push(ActionHint::new("←", "back"));
             }
         }
@@ -345,6 +393,19 @@ impl ModalView for FleetSetupView {
                 self.move_down();
                 ViewAction::None
             }
+            KeyCode::Char('m') if self.step == Step::Review => {
+                ViewAction::Emit(ViewEvent::FleetProfileModelDraftRequested {
+                    role: self.selected_role().to_string(),
+                    model_class: self.selected_model_class().to_string(),
+                    locale: self.snapshot.locale,
+                })
+            }
+            KeyCode::Char('g') if self.step == Step::Review => match self.model_draft.clone() {
+                Some(draft) => {
+                    ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft })
+                }
+                None => ViewAction::None,
+            },
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.advance(),
             KeyCode::Left | KeyCode::Char('h') => self.back(),
             KeyCode::Home => {
@@ -754,6 +815,7 @@ mod tests {
     fn snapshot() -> FleetSetupSnapshot {
         FleetSetupSnapshot {
             workspace: PathBuf::from("/tmp/codewhale-test-workspace"),
+            locale: crate::localization::Locale::En,
             provider: "DeepSeek".to_string(),
             model: "deepseek-v4-pro".to_string(),
             reasoning: "Auto".to_string(),
@@ -771,6 +833,89 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn sample_draft() -> Box<crate::fleet::profile::FleetProfileDraft> {
+        let crate::fleet::profile::UntrustedProfileParse::Drafted(draft) =
+            crate::fleet::profile::FleetProfileDraft::from_untrusted_json(
+                r#"{"id":"reviewer","role_hint":"reviewer","description":"Reviews diffs.","instructions":"Read. Report. Stop."}"#,
+            )
+        else {
+            panic!("sample draft should parse");
+        };
+        draft
+    }
+
+    fn to_review(view: &mut FleetSetupView) {
+        view.handle_key(key(KeyCode::Enter));
+        view.handle_key(key(KeyCode::Enter));
+        assert_eq!(view.step, Step::Review);
+    }
+
+    #[test]
+    fn review_step_m_requests_model_draft_with_current_answers() {
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        to_review(&mut view);
+
+        let action = view.handle_key(key(KeyCode::Char('m')));
+        let ViewAction::Emit(ViewEvent::FleetProfileModelDraftRequested {
+            role,
+            model_class,
+            locale,
+        }) = action
+        else {
+            panic!("expected model draft request");
+        };
+        assert!(!role.is_empty());
+        assert!(!model_class.is_empty());
+        assert_eq!(locale, crate::localization::Locale::En);
+    }
+
+    #[test]
+    fn ratify_is_inert_without_a_draft_and_commits_with_one() {
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        to_review(&mut view);
+
+        // No draft installed: g does nothing, m is the offered action.
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('g'))),
+            ViewAction::None
+        ));
+
+        let (title, content) = view.install_model_draft(sample_draft(), "GLM-5.2".to_string());
+        assert!(title.contains("GLM-5.2"));
+        assert!(content.contains("id = \"reviewer\""), "{content}");
+        assert!(content.contains("Nothing is saved until"), "{content}");
+
+        let action = view.handle_key(key(KeyCode::Char('g')));
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft }) =
+            action
+        else {
+            panic!("expected ratify commit event");
+        };
+        assert_eq!(draft.id, "reviewer");
+    }
+
+    #[test]
+    fn changing_answers_discards_a_stale_draft() {
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        to_review(&mut view);
+        let _ = view.install_model_draft(sample_draft(), "GLM-5.2".to_string());
+        assert!(view.model_draft.is_some());
+
+        // Back to the role step and change the selection: the draft no
+        // longer matches the answers and must not survive to ratification.
+        view.handle_key(key(KeyCode::Left));
+        view.handle_key(key(KeyCode::Left));
+        assert_eq!(view.step, Step::Role);
+        view.handle_key(key(KeyCode::Down));
+        assert!(view.model_draft.is_none());
+
+        to_review(&mut view);
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('g'))),
+            ViewAction::None
+        ));
     }
 
     #[test]

@@ -5466,6 +5466,67 @@ async fn handle_setup_constitution_model_draft(
     }
 }
 
+/// One-shot fleet-profile draft: same contract as the constitution drafter —
+/// minimal payload out, untrusted gate in, preview before ratify, degrade to
+/// the manual authoring flow on any failure.
+async fn handle_fleet_profile_model_draft(
+    app: &mut App,
+    config: &Config,
+    role: String,
+    model_class: String,
+    locale: crate::localization::Locale,
+) {
+    const DRAFT_TIMEOUT: Duration = Duration::from_secs(20);
+    let model_label = app.model_display_label();
+    let outcome = match DeepSeekClient::new(config) {
+        Err(err) => Err(format!("provider not ready: {err:#}")),
+        Ok(client) => {
+            let request_model = app.model.clone();
+            match tokio::time::timeout(
+                DRAFT_TIMEOUT,
+                crate::tui::setup::draft_fleet_profile_with_model(
+                    &client,
+                    &request_model,
+                    &role,
+                    &model_class,
+                    locale,
+                ),
+            )
+            .await
+            {
+                Err(_) => Err(format!("timed out after {}s", DRAFT_TIMEOUT.as_secs())),
+                Ok(result) => result,
+            }
+        }
+    };
+    match outcome {
+        Ok(draft) => {
+            // The wizard emitted with `Emit` (no close); if the user closed
+            // it mid-flight the draft is dropped — never installed or saved.
+            if app.view_stack.top_kind() == Some(ModalKind::FleetSetup)
+                && let Some(mut boxed) = app.view_stack.pop()
+            {
+                let preview = boxed
+                    .as_any_mut()
+                    .downcast_mut::<crate::tui::views::fleet_setup::FleetSetupView>()
+                    .map(|wizard| wizard.install_model_draft(draft, model_label.clone()));
+                app.view_stack.push_boxed(boxed);
+                if let Some((title, content)) = preview {
+                    open_text_pager(app, title, content);
+                    app.status_message = Some(format!(
+                        "{model_label} drafted the profile. Review the TOML, then press g to ratify."
+                    ));
+                }
+            }
+        }
+        Err(reason) => {
+            app.status_message = Some(format!(
+                "{model_label} could not draft the profile ({reason}). Enter still inserts the authoring prompt."
+            ));
+        }
+    }
+}
+
 // `format_*` chip/message builders moved to `tui/format_helpers.rs`.
 
 fn build_session_snapshot(app: &App, manager: &SessionManager) -> SavedSession {
@@ -9709,6 +9770,41 @@ async fn handle_view_events(
             },
             ViewEvent::SetupConstitutionModelDraftRequested { draft, locale } => {
                 handle_setup_constitution_model_draft(app, config, draft, locale).await;
+            }
+            ViewEvent::FleetProfileModelDraftRequested {
+                role,
+                model_class,
+                locale,
+            } => {
+                handle_fleet_profile_model_draft(app, config, role, model_class, locale).await;
+            }
+            ViewEvent::FleetProfileDraftCommitRequested { draft } => {
+                // The TOML is rendered deterministically from the validated
+                // draft and written atomically; the target path is derived
+                // from the sanitized id, never model-chosen.
+                let target = app
+                    .workspace
+                    .join(crate::fleet::profile::WORKSPACE_AGENT_PROFILE_DIR)
+                    .join(draft.file_name());
+                let mut txn = codewhale_config::persistence::SetupTransaction::new();
+                txn.stage(target.clone(), draft.render_toml().into_bytes());
+                match txn.commit() {
+                    Ok(()) => {
+                        app.add_message(HistoryCell::System {
+                            content: format!(
+                                "Fleet profile ratified and saved: {}",
+                                target.display()
+                            ),
+                        });
+                        app.status_message =
+                            Some(format!("Fleet profile saved: {}", draft.file_name()));
+                    }
+                    Err(err) => {
+                        app.status_message =
+                            Some(format!("Fleet profile could not be saved: {err:#}"));
+                    }
+                }
+                app.needs_redraw = true;
             }
             ViewEvent::SetupRuntimePresetApplyRequested {
                 preset,

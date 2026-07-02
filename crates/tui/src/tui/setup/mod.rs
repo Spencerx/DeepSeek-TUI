@@ -34,8 +34,10 @@ use codewhale_config::{
     StepEntry, StepStatus, UserConstitution, UserConstitutionLoad,
 };
 
+mod fleet_draft;
 mod model_draft;
 
+pub(crate) use fleet_draft::draft_fleet_profile_with_model;
 pub(crate) use model_draft::draft_constitution_with_model;
 
 /// Target lane for the once-per-version constitution checkpoint. The workspace

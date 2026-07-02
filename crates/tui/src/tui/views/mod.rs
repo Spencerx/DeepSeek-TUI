@@ -647,6 +647,24 @@ pub enum ViewEvent {
         draft: crate::tui::setup::GuidedConstitutionDraft,
         locale: crate::localization::Locale,
     },
+    /// Emitted by the fleet setup Review step (`m`) to ask the configured
+    /// model to draft the agent profile the wizard describes. The host
+    /// performs the one-shot call, pushes the sanitized/bounded draft back
+    /// into the wizard, and opens the rendered-TOML preview; on failure it
+    /// reports why and the manual authoring flow stands. Nothing is
+    /// persisted by this event.
+    FleetProfileModelDraftRequested {
+        role: String,
+        model_class: String,
+        locale: crate::localization::Locale,
+    },
+    /// Emitted by the fleet setup Review step after the user previewed a
+    /// model-drafted profile and pressed the explicit ratify key. The host
+    /// renders TOML deterministically from the validated draft and persists
+    /// it atomically under `.codewhale/agents/`.
+    FleetProfileDraftCommitRequested {
+        draft: Box<crate::fleet::profile::FleetProfileDraft>,
+    },
     /// Emitted by the setup Runtime Posture card after the user has previewed
     /// and confirmed an explicit preset/config diff.
     SetupRuntimePresetApplyRequested {
