@@ -2465,6 +2465,30 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn setup_test_options(workspace: std::path::PathBuf) -> crate::tui::app::TuiOptions {
+        crate::tui::app::TuiOptions {
+            model: "deepseek-v4-pro".to_string(),
+            workspace,
+            config_path: None,
+            config_profile: None,
+            allow_shell: true,
+            use_alt_screen: true,
+            use_mouse_capture: false,
+            use_bracketed_paste: true,
+            max_subagents: 1,
+            skills_dir: std::path::PathBuf::from("."),
+            memory_path: std::path::PathBuf::from("memory.md"),
+            notes_path: std::path::PathBuf::from("notes.txt"),
+            mcp_config_path: std::path::PathBuf::from("mcp.json"),
+            use_memory: false,
+            start_in_agent_mode: true,
+            skip_onboarding: false,
+            yolo: false,
+            resume_session_id: None,
+            initial_input: None,
+        }
+    }
+
     #[test]
     fn wizard_resumes_at_constitution_checkpoint_when_update_incomplete() {
         let state = SetupState::default();
@@ -3477,6 +3501,88 @@ mod tests {
             RuntimePostureSource::Confirmed
         );
         assert!(message.contains("Runtime posture reviewed"));
+        assert_eq!(view.selected_step(), SetupStep::ToolsMcp);
+    }
+
+    #[test]
+    fn runtime_posture_review_result_redacts_secret_config() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let codewhale_home = tmp.path().join(".codewhale");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", tmp.path());
+        let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", tmp.path());
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+
+        let mut config = Config {
+            api_key: Some("sk-runtime-posture-secret".to_string()),
+            sandbox_api_key: Some("sandbox-runtime-secret".to_string()),
+            approval_policy: Some("on-request".to_string()),
+            sandbox_mode: Some("workspace-write".to_string()),
+            ..Config::default()
+        };
+        config.default_text_model = Some("deepseek-v4-pro".to_string());
+        let app = App::new(setup_test_options(workspace), &config);
+        let facts = SetupRuntimeFacts::from_app_config(&app, &config);
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::TrustSandbox,
+            facts,
+        );
+
+        let action = view.handle_key(key(KeyCode::Enter));
+
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, .. }) = action else {
+            panic!("expected runtime posture commit event");
+        };
+        let result = state
+            .steps
+            .get(&SetupStep::TrustSandbox)
+            .and_then(|entry| entry.result.as_deref())
+            .expect("runtime posture result");
+        assert!(result.contains("intent=agent"), "{result}");
+        assert!(result.contains("sandbox=workspace-write"), "{result}");
+        for forbidden in [
+            "sk-runtime-posture-secret",
+            "sandbox-runtime-secret",
+            "api_key",
+            "sandbox_api_key",
+            "secret",
+        ] {
+            assert!(
+                !result.contains(forbidden),
+                "runtime posture result leaked {forbidden}: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_posture_skip_records_posture_specific_state() {
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::TrustSandbox,
+            SetupRuntimeFacts::default(),
+        );
+
+        let action = view.handle_key(key(KeyCode::Char('s')));
+
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, message }) = action
+        else {
+            panic!("expected runtime posture skip commit event");
+        };
+        let entry = state
+            .steps
+            .get(&SetupStep::TrustSandbox)
+            .expect("trust/sandbox step entry");
+        assert_eq!(entry.status, StepStatus::Skipped);
+        assert!(entry.required);
+        assert_eq!(entry.result.as_deref(), Some("skipped by user"));
+        assert_eq!(state.runtime_posture_source, RuntimePostureSource::Unset);
+        assert!(message.contains("skipped"));
         assert_eq!(view.selected_step(), SetupStep::ToolsMcp);
     }
 
