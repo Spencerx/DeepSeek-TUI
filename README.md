@@ -243,7 +243,11 @@ code (there are tests asserting it can't drift):
 3. **Your project's law** — drop a `.codewhale/constitution.json` in a repo to
    declare `protected_invariants`, `branch_policy`, `verification_policy`, and
    `escalate_when`. It's loaded as its own repo-local authority block, above
-   project instructions, memory, and handoffs.
+   project instructions, memory, and handoffs. A `protected_invariants` entry
+   that carries path globs is not just prose: it compiles into a mechanical,
+   tighten-only write hold in the tool gate (`ask` force-prompts even in YOLO,
+   `block` denies) with a receipt naming the invariant. See
+   [Configuration](docs/CONFIGURATION.md#enforced-repo-law-invariants).
 4. **Project instructions** — `AGENTS.md` and compatibility fallbacks explain
    how agents should work in this repo.
 5. **Memory and handoffs** — useful recalled state, lower authority than
