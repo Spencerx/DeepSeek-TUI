@@ -11,6 +11,7 @@ import { NavLinks } from "./nav-links";
 
 const EN_LINKS = [
   { href: "/en/install", label: "Install", cn: "安装" },
+  { href: "/en/constitution", label: "Constitution", cn: "宪法" },
   { href: "/en/docs", label: "Docs", cn: "文档" },
   { href: "/en/feed", label: "Community", cn: "社区" },
   { href: "/en/faq", label: "FAQ", cn: "问答" },
@@ -18,6 +19,7 @@ const EN_LINKS = [
 
 const ZH_LINKS = [
   { href: "/zh/install", label: "安装", cn: "" },
+  { href: "/zh/constitution", label: "宪法", cn: "" },
   { href: "/zh/docs", label: "文档", cn: "" },
   { href: "/zh/feed", label: "社区", cn: "" },
   { href: "/zh/faq", label: "常见问题", cn: "" },

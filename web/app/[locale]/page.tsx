@@ -163,6 +163,55 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       {/* live repo activity — below the hero, above the numbers */}
       <Ticker items={feed} />
 
+      {/* THREE LAYERS OF LAW — the thesis in brief; the full page is /constitution */}
+      <section className="mx-auto max-w-[1400px] px-6 py-12">
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2 mb-6 hairline-b pb-4">
+          <Seal char="法" />
+          <h2 className="font-display">{isZh ? "三层法" : "Three layers of law"}</h2>
+          <span className="pill pill-new">
+            {isZh ? "v0.8.67 新增：宪法优先设置" : "New in v0.8.67: constitution-first setup"}
+          </span>
+        </div>
+
+        <div className="grid md:grid-cols-3 gap-0 col-rule hairline-t hairline-b">
+          {(isZh
+            ? [
+                { n: "01", t: "内置宪法", path: "编译进每一个二进制", d: "基础法。其中的位阶条款为一切冲突固定裁决顺序。" },
+                { n: "02", t: "/constitution", path: "$CODEWHALE_HOME/constitution.json", d: "你的常备法——首次启动引导起草，模型可以代拟，由你批准，跨项目生效。" },
+                { n: "03", t: "仓库自己的法", path: ".codewhale/constitution.json", d: "受保护的不变量、分支策略、验证要求、升级条件——位阶高于项目说明、记忆与交接。" },
+              ]
+            : [
+                { n: "01", t: "Bundled Constitution", path: "compiled into every binary", d: "The base law. Its priority article fixes the authority order for any conflict." },
+                { n: "02", t: "/constitution", path: "$CODEWHALE_HOME/constitution.json", d: "Your standing law — drafted at first launch with your model's help, ratified by you, carried across projects." },
+                { n: "03", t: "Your repo's law", path: ".codewhale/constitution.json", d: "Protected invariants, branch policy, verification, escalation — above project instructions, memory, and handoffs." },
+              ]
+          ).map((item) => (
+            <Link key={item.n} href={isZh ? "/zh/constitution" : "/constitution"} className="block p-6 hover:bg-paper-deep transition-colors">
+              <div className="font-mono uppercase tracking-widest mb-2 text-[0.7rem] text-indigo">{item.n}</div>
+              <h3 className="font-display text-xl mb-1">{item.t}</h3>
+              <div className="font-mono text-[0.68rem] text-ink-mute mb-3 break-all">{item.path}</div>
+              <p className={`text-sm text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
+                {item.d}
+              </p>
+            </Link>
+          ))}
+        </div>
+
+        <div className="mt-5 flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+          <p className="text-xs text-ink-mute leading-relaxed max-w-xl">
+            {isZh
+              ? "审批、沙箱、网络与信任控制由代码强制执行——宪法文本永远越不过它们。"
+              : "Approval, sandbox, network, and trust controls are enforced in code — constitution text never overrides them."}
+          </p>
+          <Link
+            href={isZh ? "/zh/constitution" : "/constitution"}
+            className="font-mono text-xs uppercase tracking-widest text-indigo hover:underline"
+          >
+            {isZh ? "为什么是法 →" : "Why law →"}
+          </Link>
+        </div>
+      </section>
+
       <StatGrid stats={stats} />
 
       {/* GET STARTED — the two or three steps, with the real links */}
