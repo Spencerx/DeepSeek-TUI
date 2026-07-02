@@ -245,6 +245,7 @@ fn trailing_start_marker_prefix_len(text: &str) -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 pub(crate) fn filter_tool_call_delta(delta: &str, in_tool_call: &mut bool) -> String {
     let mut state = ToolCallDeltaFilterState {
         in_tool_call: *in_tool_call,
