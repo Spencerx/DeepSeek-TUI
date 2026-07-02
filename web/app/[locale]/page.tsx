@@ -252,22 +252,33 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
           ))}
         </div>
 
-        {/* HONEST STATUS — what's working right now, and what isn't */}
+        {/* ANY MODEL, HONESTLY — provider honesty, with live status folded in */}
         <div className="mt-10 px-4 py-3 hairline-t hairline-b hairline-l hairline-r text-sm leading-relaxed max-w-2xl space-y-1.5">
-          <div className="eyebrow mb-1.5">{isZh ? "当前状态" : "Where things stand"}</div>
+          <div className="eyebrow mb-1.5">{isZh ? "任意模型，实话实说" : "Any model, honestly"}</div>
+          <p className={`text-xs text-ink-soft pb-1 ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
+            {isZh
+              ? `${facts.providers.length} 个提供商，同一个运行时。自带密钥，没有推理加价，不会悄悄换模型。此刻的真实情况：`
+              : `${facts.providers.length} providers, one runtime. Bring your own key, no inference markup, no silent model switching. Where things stand right now:`}
+          </p>
           {isZh ? (
             <>
               <div><span className="text-jade font-mono text-xs mr-2">✓</span>当前推荐：<span className="font-mono">GLM 5.2</span>，<span className="font-mono">high</span> reasoning，在 CodeWhale 里表现很好。</div>
               <div><span className="text-jade font-mono text-xs mr-2">✓</span>OpenAI Codex 登录可用。</div>
               <div><span className="text-ink-mute font-mono text-xs mr-2">✗</span>Kimi OAuth 暂时不可用，正在修。</div>
-              <div className="pt-1 text-xs text-ink-mute">没看到你想要的模型或端点？<a href="https://github.com/Hmbown/CodeWhale/issues/new" className="text-indigo hover:underline">开个 issue</a>。</div>
+              <div className="pt-1 text-xs text-ink-mute flex flex-wrap gap-x-4 gap-y-1">
+                <Link href="/zh/models" className="text-indigo hover:underline">全部提供商 →</Link>
+                <span>没看到你想要的模型或端点？<a href="https://github.com/Hmbown/CodeWhale/issues/new" className="text-indigo hover:underline">开个 issue</a>。</span>
+              </div>
             </>
           ) : (
             <>
               <div><span className="text-jade font-mono text-xs mr-2">✓</span>Recommended right now: <span className="font-mono">GLM 5.2</span> on <span className="font-mono">high</span> reasoning — working very well in CodeWhale.</div>
               <div><span className="text-jade font-mono text-xs mr-2">✓</span>OpenAI Codex login is working.</div>
               <div><span className="text-ink-mute font-mono text-xs mr-2">✗</span>Kimi OAuth is temporarily broken; on the list.</div>
-              <div className="pt-1 text-xs text-ink-mute">Don&apos;t see a model or endpoint you want? <a href="https://github.com/Hmbown/CodeWhale/issues/new" className="text-indigo hover:underline">Open an issue</a>.</div>
+              <div className="pt-1 text-xs text-ink-mute flex flex-wrap gap-x-4 gap-y-1">
+                <Link href="/models" className="text-indigo hover:underline">All providers →</Link>
+                <span>Don&apos;t see a model or endpoint you want? <a href="https://github.com/Hmbown/CodeWhale/issues/new" className="text-indigo hover:underline">Open an issue</a>.</span>
+              </div>
             </>
           )}
         </div>

@@ -9,6 +9,7 @@ const EN_COLS = [
     items: [
       { label: "Install", href: "/en/install" },
       { label: "Constitution", href: "/en/constitution" },
+      { label: "Models & Providers", href: "/en/models" },
       { label: "Documentation", href: "/en/docs" },
       { label: "Runtime", href: "/en/runtime" },
       { label: "Roadmap", href: "/en/roadmap" },
@@ -48,6 +49,7 @@ const ZH_COLS = [
     items: [
       { label: "安装指南", href: "/zh/install" },
       { label: "宪法", href: "/zh/constitution" },
+      { label: "模型与提供商", href: "/zh/models" },
       { label: "使用文档", href: "/zh/docs" },
       { label: "集成", href: "/zh/runtime" },
       { label: "路线图", href: "/zh/roadmap" },
