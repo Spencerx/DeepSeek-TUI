@@ -3784,6 +3784,7 @@ mod tests {
         assert!(!root.iter().any(|hint| hint.name == "/rlm"));
         assert!(!root.iter().any(|hint| hint.name == "/modeldb"));
         assert!(!root.iter().any(|hint| hint.name == "/models"));
+        assert!(!root.iter().any(|hint| hint.name == "/plugin"));
         assert!(!root.iter().any(|hint| hint.name == "/subagents"));
 
         let rlm = slash_completion_hints("/rl", 128, &[], Locale::En, None, ApiProvider::Deepseek);
@@ -3792,6 +3793,10 @@ mod tests {
         let modeldb =
             slash_completion_hints("/modeld", 128, &[], Locale::En, None, ApiProvider::Deepseek);
         assert!(modeldb.iter().any(|hint| hint.name == "/modeldb"));
+
+        let plugin =
+            slash_completion_hints("/pl", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+        assert!(plugin.iter().any(|hint| hint.name == "/plugin"));
 
         let subagents =
             slash_completion_hints("/sub", 128, &[], Locale::En, None, ApiProvider::Deepseek);

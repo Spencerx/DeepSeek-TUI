@@ -753,6 +753,25 @@ mod tests {
     }
 
     #[test]
+    fn command_discovery_tier_lists_use_canonical_registered_names() {
+        for (tier_name, names) in [
+            ("advanced", traits::ADVANCED_DISCOVERY_COMMANDS),
+            ("compatibility", traits::COMPATIBILITY_DISCOVERY_COMMANDS),
+        ] {
+            for &name in names {
+                let info = registry()
+                    .get_info(name)
+                    .unwrap_or_else(|| panic!("{tier_name} discovery entry {name:?} must resolve"));
+                assert_eq!(
+                    info.name, name,
+                    "{tier_name} discovery entry {name:?} must be canonical, not an alias for /{}",
+                    info.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn command_info_resolves_canonical_names_and_aliases() {
         for command in command_infos() {
             for lookup in [command.name.to_string(), format!("/{}", command.name)] {

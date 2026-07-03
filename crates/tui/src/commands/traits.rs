@@ -23,6 +23,43 @@ pub enum CommandDiscovery {
     Compatibility,
 }
 
+pub(crate) const ADVANCED_DISCOVERY_COMMANDS: &[&str] = &[
+    "anchor",
+    "balance",
+    "cache",
+    "change",
+    "context",
+    "debt",
+    "diff",
+    "edit",
+    "goal",
+    "hf",
+    "hooks",
+    "lsp",
+    "modeldb",
+    "models",
+    "network",
+    "plugin",
+    "profile",
+    "purge",
+    "relay",
+    "rename",
+    "rlm",
+    "settings",
+    "share",
+    "sidebar",
+    "status",
+    "system",
+    "theme",
+    "tokens",
+    "translate",
+    "trust",
+    "verbose",
+    "workspace",
+];
+
+pub(crate) const COMPATIBILITY_DISCOVERY_COMMANDS: &[&str] = &["subagents"];
+
 impl CommandDiscovery {
     pub fn show_at_root(self) -> bool {
         matches!(self, CommandDiscovery::Primary)
@@ -69,14 +106,12 @@ impl CommandInfo {
     }
 
     pub fn discovery(&self) -> CommandDiscovery {
-        match self.name {
-            "subagents" => CommandDiscovery::Compatibility,
-            "anchor" | "balance" | "cache" | "change" | "context" | "debt" | "diff" | "edit"
-            | "goal" | "hf" | "hooks" | "lsp" | "modeldb" | "models" | "network" | "plugins"
-            | "profile" | "purge" | "relay" | "rename" | "rlm" | "settings" | "share"
-            | "sidebar" | "status" | "system" | "theme" | "tokens" | "translate" | "trust"
-            | "verbose" | "workspace" => CommandDiscovery::Advanced,
-            _ => CommandDiscovery::Primary,
+        if COMPATIBILITY_DISCOVERY_COMMANDS.contains(&self.name) {
+            CommandDiscovery::Compatibility
+        } else if ADVANCED_DISCOVERY_COMMANDS.contains(&self.name) {
+            CommandDiscovery::Advanced
+        } else {
+            CommandDiscovery::Primary
         }
     }
 
