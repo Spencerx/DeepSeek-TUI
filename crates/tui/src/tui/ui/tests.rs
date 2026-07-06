@@ -2338,7 +2338,7 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
 #[tokio::test]
 async fn apply_loaded_session_resets_workspace_runtime_state() {
     let mut app = create_test_app();
-    let config = Config::default();
+    let mut config = Config::default();
     let old_shell_manager = app
         .runtime_services
         .shell_manager
@@ -2416,7 +2416,7 @@ fn shell_live_output_refresh_does_not_block_on_contended_lock() {
 #[test]
 fn apply_loaded_session_updates_current_workspace_display() {
     let mut app = create_test_app();
-    let config = Config::default();
+    let mut config = Config::default();
     let workspace = TempDir::new().expect("temp dir");
     let mut session = saved_session_with_messages(vec![text_message("assistant", "ready")]);
     session.metadata.workspace = workspace.path().to_path_buf();
