@@ -34,6 +34,7 @@ mod subagents;
 mod translate;
 pub mod util;
 pub mod voice;
+mod workflow;
 mod workspace;
 
 pub(in crate::commands) use self::core::reset_conversation_state;
@@ -97,6 +98,10 @@ impl CommandGroup for CoreCommands {
             Box::new(FunctionCommand::new(
                 fleet::FleetCmd::info(),
                 fleet::FleetCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                workflow::WorkflowCmd::info(),
+                workflow::WorkflowCmd::execute,
             )),
             Box::new(FunctionCommand::new(
                 hotbar::HotbarCmd::info(),

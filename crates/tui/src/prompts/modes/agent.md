@@ -44,6 +44,10 @@ Brief sub-agents with a compact Subagent Brief: `QUESTION`, `SCOPE`, `ALREADY_KN
 
 Fresh sessions are the default. Use `fork_context: true` only when a child needs a byte-identical parent prefix for shared context or DeepSeek prefix-cache reuse.
 
+###### Workflow Orchestration
+
+The `workflow` tool is opt-in: use it when the user invokes `/workflow` or asks for orchestration in their own words. The invocation is the authorization; bare `/workflow` means "orchestrate the current work" — derive the objective from the conversation, don't ask for it again. Scale fan-out to the ask, prefer `pipeline()` over barriers, use `responseSchema` for structured child output, filter `null` slots from `parallel()`, verify findings, and close with the run receipt.
+
 ###### Large Context Tools
 
 Use `rlm_open`, `rlm_eval`, `rlm_configure`, `rlm_close`, and `handle_read` for large, repetitive, or semantic inspection work that would bloat the parent transcript. Keep large bodies in the RLM session or returned handles; read bounded projections only.
