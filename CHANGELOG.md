@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Renamed the internal `whaleflow` subsystem to `workflow` across the
+  workspace: the `codewhale-whaleflow`/`codewhale-whaleflow-js` crates become
+  `codewhale-workflow`/`codewhale-workflow-js`, Rust identifiers and JS bridge
+  symbols are renamed, the `CODEWHALE_WHALEFLOW_JS_*` environment variables
+  become `CODEWHALE_WORKFLOW_JS_*`, and the authoring/RFC docs move to
+  `WORKFLOW_AUTHORING.md` and `WORKFLOW_EXTERNAL_MEMORY.md`. Historical
+  changelog and retro-ledger entries keep the old name as a record.
 - Documented the Homebrew rollout strategy and added a distribution-channel
   check to the release checklist. Harvested from #3760 by @idling11 (#3489).
 - Made the approval prompt calm, compact, and honest, and centered the
@@ -101,6 +108,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed the goal sidebar elapsed timer so completed and blocked goals freeze
+  their "completed in {elapsed}" readout instead of ticking forever. Goal state
+  now records a `finished_at` instant that both sidebar render paths and the
+  engine snapshot clamp elapsed against; `/goal resume` clears the freeze and
+  the timer ticks again.
 - Fixed session save/load to persist and restore the active model provider
   across restarts. Previously sessions created under one provider (e.g.
   DeepSeek) would silently load under a different active provider. Provider,

@@ -167,7 +167,7 @@ context dài hơn, tự chủ nhiều hơn. CodeWhale bắt đầu bằng việc
 nhiệm.
 
 (Đây là mission thiết kế đang được đưa vào phiên bản này; memory, cost,
-và remote orchestration vẫn đang lặp lại — xem v0.9.0 Track bên dưới.)
+và remote orchestration vẫn đang lặp lại — xem Track tiếp theo bên dưới.)
 
 Một agent sửa repo của bạn cần có một địa chỉ — terminal này, người dùng này,
 branch này, session này. Không phải một persona; một địa chỉ để truy hồi. Khi
