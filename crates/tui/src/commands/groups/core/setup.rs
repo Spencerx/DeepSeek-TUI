@@ -1,6 +1,7 @@
 //! `/setup` command.
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
+use crate::config::ApiProvider;
 use crate::localization::MessageId;
 use crate::tui::app::{App, AppAction};
 
@@ -22,7 +23,30 @@ impl RegisterCommand for SetupCmd {
     }
 
     fn execute(_app: &mut App, arg: Option<&str>) -> CommandResult {
-        match arg.map(str::trim).filter(|arg| !arg.is_empty()) {
+        let target = arg.map(str::trim).filter(|arg| !arg.is_empty());
+        if let Some(arg) = target {
+            let mut parts = arg.split_whitespace();
+            if matches!(parts.next(), Some("provider" | "providers"))
+                && let Some(raw_provider) = parts.next()
+            {
+                if parts.next().is_some() {
+                    return CommandResult::error(
+                        "Usage: /setup provider [provider-name]".to_string(),
+                    );
+                }
+                let Some(provider) = ApiProvider::parse(raw_provider) else {
+                    return CommandResult::error(format!(
+                        "Unknown provider '{raw_provider}'. Expected: {}.",
+                        ApiProvider::names_hint()
+                    ));
+                };
+                return CommandResult::action(AppAction::OpenProviderSetup {
+                    provider: Some(provider),
+                });
+            }
+        }
+
+        match target {
             None | Some("open" | "wizard" | "checkpoint") => {
                 CommandResult::action(AppAction::OpenSetupWizard)
             }
@@ -193,5 +217,35 @@ mod tests {
             })
         );
         assert!(result.message.is_none());
+    }
+
+    #[test]
+    fn setup_provider_named_opens_provider_setup_catalog() {
+        let mut app = test_app();
+
+        let result = SetupCmd::execute(&mut app, Some("provider anthropic"));
+
+        assert_eq!(
+            result.action,
+            Some(AppAction::OpenProviderSetup {
+                provider: Some(ApiProvider::Anthropic)
+            })
+        );
+        assert!(result.message.is_none());
+    }
+
+    #[test]
+    fn setup_provider_named_rejects_unknown_provider() {
+        let mut app = test_app();
+
+        let result = SetupCmd::execute(&mut app, Some("provider imaginary"));
+
+        assert!(result.action.is_none());
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("Unknown provider 'imaginary'"))
+        );
     }
 }
