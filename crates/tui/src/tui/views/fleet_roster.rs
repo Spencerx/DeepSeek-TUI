@@ -612,6 +612,7 @@ mod tests {
             ids,
             [
                 "manager",
+                "operator",
                 "scout",
                 "builder",
                 "reviewer",
