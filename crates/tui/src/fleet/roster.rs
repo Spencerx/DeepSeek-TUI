@@ -413,7 +413,11 @@ mod tests {
         // An unrecognized provider id is still a load failure (#4093):
         // `provider` is now a first-class field, but it's validated against
         // the known `ApiProvider` vocabulary, not accepted as any string.
-        write_workspace_profile(tmp.path(), "broken.toml", "provider = \"not-a-real-provider\"\n");
+        write_workspace_profile(
+            tmp.path(),
+            "broken.toml",
+            "provider = \"not-a-real-provider\"\n",
+        );
         let config = config_with_profiles(BTreeMap::from([(
             "extra".to_string(),
             config_profile("scout", None),
