@@ -63,6 +63,11 @@ struct AgentProfileToml {
     /// smuggled one.
     #[serde(default)]
     provider: Option<String>,
+    /// Optional saved thinking tier for this profile (#4137). TOML may use
+    /// the canonical `reasoning_effort` spelling or the UI-facing `thinking`
+    /// / `reasoning` aliases; loading normalizes to a canonical setting label.
+    #[serde(default, alias = "thinking", alias = "reasoning")]
+    reasoning_effort: Option<String>,
     #[serde(default)]
     instructions: Option<AgentProfileInstructions>,
     #[serde(default)]
@@ -174,6 +179,8 @@ fn agent_profile_from_toml(path: &Path, parsed: AgentProfileToml) -> Result<Agen
         .map(str::to_string)
         .map(|provider| validate_agent_profile_provider(path, &provider).map(|()| provider))
         .transpose()?;
+    let reasoning_effort =
+        normalize_agent_profile_reasoning_effort(path, parsed.reasoning_effort.as_deref())?;
 
     let instructions = parsed
         .instructions
@@ -193,6 +200,7 @@ fn agent_profile_from_toml(path: &Path, parsed: AgentProfileToml) -> Result<Agen
         loadout,
         model,
         provider,
+        reasoning_effort,
         permissions: FleetProfilePermissions::default(),
         delegation: FleetDelegationHints::default(),
     };
@@ -290,6 +298,29 @@ fn validate_agent_profile_provider(path: &Path, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn normalize_agent_profile_reasoning_effort(
+    path: &Path,
+    value: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(value) = non_empty_trimmed(value) else {
+        return Ok(None);
+    };
+    let normalized = match value.to_ascii_lowercase().as_str() {
+        "inherit" | "parent" | "same" | "current" | "default" | "unset" => return Ok(None),
+        "off" | "disabled" | "none" | "false" => "off",
+        "low" | "minimal" => "low",
+        "medium" | "mid" => "medium",
+        "high" => "high",
+        "auto" | "automatic" => "auto",
+        "max" | "maximum" | "xhigh" | "ultracode" => "max",
+        _ => bail!(
+            "agent profile {} reasoning_effort {value:?} must be one of: inherit, auto, off, low, medium, high, max",
+            path.display()
+        ),
+    };
+    Ok(Some(normalized.to_string()))
+}
+
 fn is_agent_profile_token_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')
 }
@@ -353,6 +384,9 @@ pub struct FleetProfileDraft {
     /// structured picker. `None` means "no route pin" (inherit) — matching
     /// `model: None` — or a legacy/untrusted draft that predates this field.
     pub provider: Option<String>,
+    /// Explicit saved thinking tier, set only by structured setup controls.
+    /// `None` means inherit the operator/session reasoning tier.
+    pub reasoning_effort: Option<String>,
     pub instructions: Option<String>,
 }
 
@@ -461,6 +495,7 @@ impl FleetProfileDraft {
             // Never set from untrusted model output — `FleetProfileDraftJson`
             // has no `provider` field, so there is nothing to read here.
             provider: None,
+            reasoning_effort: None,
             instructions,
         };
         if draft.description.is_none() && draft.instructions.is_none() {
@@ -509,6 +544,12 @@ impl FleetProfileDraft {
                     toml::Value::String(provider.clone()),
                 );
             }
+        }
+        if let Some(ref reasoning_effort) = self.reasoning_effort {
+            root.insert(
+                "reasoning_effort".to_string(),
+                toml::Value::String(reasoning_effort.clone()),
+            );
         }
         if let Some(ref instructions) = self.instructions {
             let mut table = toml::value::Table::new();
@@ -692,6 +733,7 @@ mod tests {
             model_class_hint: None,
             model: Some("deepseek-v4-flash".to_string()),
             provider: Some("deepseek".to_string()),
+            reasoning_effort: None,
             instructions: None,
         };
 
@@ -712,6 +754,77 @@ mod tests {
     }
 
     #[test]
+    fn draft_with_reasoning_effort_round_trips_through_the_loader() {
+        let draft = FleetProfileDraft {
+            id: "scout-deep".to_string(),
+            display_name: Some("Scout".to_string()),
+            description: Some("Deep scout profile.".to_string()),
+            role_hint: "scout".to_string(),
+            model_class_hint: None,
+            model: Some("deepseek-v4-pro".to_string()),
+            provider: Some("deepseek".to_string()),
+            reasoning_effort: Some("max".to_string()),
+            instructions: None,
+        };
+
+        let rendered = draft.render_toml();
+        assert!(
+            rendered.contains("reasoning_effort = \"max\""),
+            "rendered TOML must persist explicit reasoning: {rendered}"
+        );
+
+        let dir = TempDir::new().unwrap();
+        write_profile(dir.path(), &draft.file_name(), &rendered);
+        let profiles = load_agent_profiles_from_dir(dir.path()).expect("rendered TOML loads");
+        assert_eq!(profiles.len(), 1);
+        let loaded = &profiles[0];
+        assert_eq!(loaded.profile.provider.as_deref(), Some("deepseek"));
+        assert_eq!(loaded.profile.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(loaded.profile.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn profile_loader_normalizes_reasoning_aliases() {
+        let dir = TempDir::new().unwrap();
+        write_profile(
+            dir.path(),
+            "scout.toml",
+            r#"
+id = "scout"
+role_hint = "scout"
+thinking = "xhigh"
+
+[instructions]
+text = "Scout deeply."
+"#,
+        );
+
+        let profiles = load_agent_profiles_from_dir(dir.path()).expect("profile TOML loads");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].profile.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn profile_loader_rejects_unknown_reasoning_effort() {
+        let dir = TempDir::new().unwrap();
+        write_profile(
+            dir.path(),
+            "scout.toml",
+            r#"
+id = "scout"
+role_hint = "scout"
+reasoning = "expensive"
+"#,
+        );
+
+        let err = load_agent_profiles_from_dir(dir.path()).expect_err("invalid effort must fail");
+        assert!(
+            err.to_string().contains("reasoning_effort"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn inherit_draft_never_renders_a_provider_without_a_model() {
         // `provider` is only meaningful alongside a concrete model pin; an
         // `inherit` draft (no `model`) must never render one even if a stale
@@ -724,6 +837,7 @@ mod tests {
             model_class_hint: None,
             model: None,
             provider: Some("deepseek".to_string()),
+            reasoning_effort: None,
             instructions: None,
         };
         let rendered = draft.render_toml();

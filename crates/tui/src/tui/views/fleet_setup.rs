@@ -120,6 +120,50 @@ const MODEL_INHERIT: Choice = Choice {
     ),
 };
 
+const THINKING_CHOICES: &[Choice] = &[
+    Choice {
+        label: Cow::Borrowed("inherit"),
+        summary: Cow::Borrowed("Same thinking as now"),
+        description: Cow::Borrowed(
+            "Reuse the operator's current reasoning setting for this worker. Recommended default.",
+        ),
+    },
+    Choice {
+        label: Cow::Borrowed("off"),
+        summary: Cow::Borrowed("No extra thinking"),
+        description: Cow::Borrowed(
+            "Use for narrow lookups or mechanical work where speed matters.",
+        ),
+    },
+    Choice {
+        label: Cow::Borrowed("low"),
+        summary: Cow::Borrowed("Small thinking budget"),
+        description: Cow::Borrowed(
+            "Use for bounded checks that still benefit from light reasoning.",
+        ),
+    },
+    Choice {
+        label: Cow::Borrowed("medium"),
+        summary: Cow::Borrowed("Balanced thinking budget"),
+        description: Cow::Borrowed("Use for normal implementation and review work."),
+    },
+    Choice {
+        label: Cow::Borrowed("high"),
+        summary: Cow::Borrowed("Deep thinking budget"),
+        description: Cow::Borrowed("Use for harder design, debugging, and integration tasks."),
+    },
+    Choice {
+        label: Cow::Borrowed("max"),
+        summary: Cow::Borrowed("Maximum thinking budget"),
+        description: Cow::Borrowed("Use for hard release, security, and root-cause work."),
+    },
+    Choice {
+        label: Cow::Borrowed("auto"),
+        summary: Cow::Borrowed("Let CodeWhale choose"),
+        description: Cow::Borrowed("Choose a thinking tier from the worker prompt at runtime."),
+    },
+];
+
 #[derive(Debug, Clone)]
 pub struct FleetSetupSnapshot {
     workspace: PathBuf,
@@ -242,6 +286,8 @@ enum Step {
     Role,
     /// Pick the model-routing class.
     Model,
+    /// Pick the saved thinking tier.
+    Thinking,
     /// Review the full posture and start.
     Review,
 }
@@ -251,6 +297,7 @@ pub struct FleetSetupView {
     step: Step,
     role_idx: usize,
     model_idx: usize,
+    thinking_idx: usize,
     review_scroll: usize,
     /// A model-drafted profile awaiting ratification (already sanitized and
     /// bounded by the untrusted gate). Cleared when the selection changes so
@@ -304,6 +351,7 @@ impl FleetSetupView {
             step: Step::Role,
             role_idx: 0,
             model_idx: 0,
+            thinking_idx: 0,
             review_scroll: 0,
             model_draft: None,
             model_draft_label: None,
@@ -322,6 +370,7 @@ impl FleetSetupView {
         mut draft: Box<crate::fleet::profile::FleetProfileDraft>,
         model_label: String,
         picked_route: Option<(String, String)>,
+        reasoning_effort: Option<String>,
     ) -> (String, String) {
         // Re-inject the route the operator picked at `m`-press time (#4093). A
         // model draft comes from `from_untrusted_json`, which hard-sets
@@ -337,6 +386,7 @@ impl FleetSetupView {
             draft.model = Some(model);
             draft.provider = Some(provider);
         }
+        draft.reasoning_effort = reasoning_effort;
         let (title, header) = (
             tr(self.snapshot.locale, MessageId::FleetDraftTitle)
                 .replace("{model_label}", &model_label),
@@ -385,11 +435,26 @@ impl FleetSetupView {
         self.model_routes.get(self.model_idx).cloned()
     }
 
+    fn selected_reasoning_effort(&self) -> Option<String> {
+        if self.thinking_idx == 0 {
+            return None;
+        }
+        THINKING_CHOICES
+            .get(self.thinking_idx)
+            .map(|choice| choice.label.to_string())
+    }
+
+    fn selected_thinking_label(&self) -> String {
+        self.selected_reasoning_effort()
+            .unwrap_or_else(|| format!("inherit ({})", self.snapshot.reasoning))
+    }
+
     /// Number of selectable rows on the current step (0 on the review step).
     fn step_len(&self) -> usize {
         match self.step {
             Step::Role => ROLES.len(),
             Step::Model => self.model_choices.len(),
+            Step::Thinking => THINKING_CHOICES.len(),
             Step::Review => 0,
         }
     }
@@ -402,6 +467,10 @@ impl FleetSetupView {
             }
             Step::Model => {
                 self.model_idx = self.model_idx.saturating_sub(1);
+                self.discard_model_draft();
+            }
+            Step::Thinking => {
+                self.thinking_idx = self.thinking_idx.saturating_sub(1);
                 self.discard_model_draft();
             }
             Step::Review => self.review_scroll = self.review_scroll.saturating_sub(1),
@@ -425,6 +494,10 @@ impl FleetSetupView {
                 self.model_idx = (self.model_idx + 1).min(self.step_len().saturating_sub(1));
                 self.discard_model_draft();
             }
+            Step::Thinking => {
+                self.thinking_idx = (self.thinking_idx + 1).min(self.step_len().saturating_sub(1));
+                self.discard_model_draft();
+            }
             Step::Review => self.review_scroll = self.review_scroll.saturating_add(1),
         }
     }
@@ -438,6 +511,10 @@ impl FleetSetupView {
                 ViewAction::None
             }
             Step::Model => {
+                self.step = Step::Thinking;
+                ViewAction::None
+            }
+            Step::Thinking => {
                 self.step = Step::Review;
                 self.review_scroll = 0;
                 ViewAction::None
@@ -455,8 +532,12 @@ impl FleetSetupView {
                 self.step = Step::Role;
                 ViewAction::None
             }
-            Step::Review => {
+            Step::Thinking => {
                 self.step = Step::Model;
+                ViewAction::None
+            }
+            Step::Review => {
+                self.step = Step::Thinking;
                 ViewAction::None
             }
         }
@@ -498,6 +579,7 @@ impl FleetSetupView {
             model_class_hint: None,
             model: route.as_ref().map(|(_, model)| model.clone()),
             provider: route.map(|(provider, _)| provider),
+            reasoning_effort: self.selected_reasoning_effort(),
             instructions: Some(format!(
                 "Role: {}. Work only within the assigned Fleet slice. Report concise evidence and stop when the assignment is complete. Do not widen permissions, trust, route configuration, or topology.",
                 role.label
@@ -515,6 +597,11 @@ impl FleetSetupView {
                 hints.push(ActionHint::new("Enter", "next"));
             }
             Step::Model => {
+                hints.push(ActionHint::new("↑/↓", "choose"));
+                hints.push(ActionHint::new("Enter", "next"));
+                hints.push(ActionHint::new("←", "back"));
+            }
+            Step::Thinking => {
                 hints.push(ActionHint::new("↑/↓", "choose"));
                 hints.push(ActionHint::new("Enter", "next"));
                 hints.push(ActionHint::new("←", "back"));
@@ -572,6 +659,7 @@ impl ModalView for FleetSetupView {
                     // re-injects it authoritatively from the wizard's current
                     // selection, but the event stays self-describing.
                     provider: route.map(|(provider, _)| provider),
+                    reasoning_effort: self.selected_reasoning_effort(),
                     locale: self.snapshot.locale,
                 })
             }
@@ -621,7 +709,8 @@ impl ModalView for FleetSetupView {
         let step_no = match self.step {
             Step::Role => 1,
             Step::Model => 2,
-            Step::Review => 3,
+            Step::Thinking => 3,
+            Step::Review => 4,
         };
         let block = Block::default()
             .title(Line::from(Span::styled(
@@ -632,7 +721,7 @@ impl ModalView for FleetSetupView {
             )))
             .title_bottom(
                 Line::from(Span::styled(
-                    format!(" Step {step_no}/3 "),
+                    format!(" Step {step_no}/4 "),
                     Style::default().fg(palette::TEXT_MUTED),
                 ))
                 .alignment(ratatui::layout::Alignment::Right),
@@ -682,6 +771,16 @@ impl ModalView for FleetSetupView {
                     },
                 ],
             ),
+            Step::Thinking => render_choice_step(
+                chunks[1],
+                buf,
+                THINKING_CHOICES,
+                self.thinking_idx,
+                &[
+                    format!("Current reasoning: {}", self.snapshot.reasoning),
+                    format!("This worker will use {}.", self.selected_thinking_label()),
+                ],
+            ),
             Step::Review => self.render_review(chunks[1], buf),
         }
     }
@@ -697,6 +796,10 @@ impl FleetSetupView {
             Step::Model => (
                 "Choose a model",
                 "Pick this worker's model, or inherit your current route.",
+            ),
+            Step::Thinking => (
+                "Choose thinking",
+                "Pick this worker's reasoning tier, or inherit your current setting.",
             ),
             Step::Review if self.model_draft.is_some() => (
                 "Ratify the draft",
@@ -778,6 +881,7 @@ impl FleetSetupView {
                 ),
             },
         );
+        section(&mut lines, "Thinking", self.selected_thinking_label());
         section(
             &mut lines,
             "Permissions",
@@ -1042,6 +1146,7 @@ mod tests {
     fn to_review(view: &mut FleetSetupView) {
         view.handle_key(key(KeyCode::Enter));
         view.handle_key(key(KeyCode::Enter));
+        view.handle_key(key(KeyCode::Enter));
         assert_eq!(view.step, Step::Review);
     }
 
@@ -1055,6 +1160,7 @@ mod tests {
             role,
             model,
             provider,
+            reasoning_effort,
             locale,
         }) = action
         else {
@@ -1065,6 +1171,7 @@ mod tests {
         // Default selection is `inherit` (model_idx 0), which carries no
         // concrete provider route.
         assert_eq!(provider, None);
+        assert_eq!(reasoning_effort, None);
         assert_eq!(locale, crate::localization::Locale::En);
     }
 
@@ -1093,18 +1200,26 @@ mod tests {
             view.selected_route(),
             Some(("zai".to_string(), "glm-5.2".to_string()))
         );
-        view.handle_key(key(KeyCode::Enter)); // Model -> Review
+        view.handle_key(key(KeyCode::Enter)); // Model -> Thinking
+        while view.selected_reasoning_effort().as_deref() != Some("max") {
+            view.handle_key(key(KeyCode::Down));
+        }
+        view.handle_key(key(KeyCode::Enter)); // Thinking -> Review
 
         // `m` requests a draft and carries the picked cross-provider route.
         let action = view.handle_key(key(KeyCode::Char('m')));
         let ViewAction::Emit(ViewEvent::FleetProfileModelDraftRequested {
-            model, provider, ..
+            model,
+            provider,
+            reasoning_effort,
+            ..
         }) = action
         else {
             panic!("expected model draft request");
         };
         assert_eq!(model, "glm-5.2");
         assert_eq!(provider.as_deref(), Some("zai"));
+        assert_eq!(reasoning_effort.as_deref(), Some("max"));
 
         // The host reconstructs the picked route from the event exactly as
         // `handle_fleet_profile_model_draft` does, and carries it to
@@ -1117,17 +1232,24 @@ mod tests {
         assert_eq!(drafted.provider, None);
 
         // Installing it re-injects the picked route, so the ratified draft keeps
-        // BOTH the provider and the model the user actually chose.
-        let (_title, content) =
-            view.install_model_draft(drafted, "GLM-5.2".to_string(), picked_route);
+        // BOTH the provider and the model the user actually chose, plus the
+        // captured thinking tier.
+        let (_title, content) = view.install_model_draft(
+            drafted,
+            "GLM-5.2".to_string(),
+            picked_route,
+            reasoning_effort,
+        );
         let ratified = view.model_draft.as_deref().expect("draft installed");
         assert_eq!(ratified.provider.as_deref(), Some("zai"));
         assert_eq!(ratified.model.as_deref(), Some("glm-5.2"));
+        assert_eq!(ratified.reasoning_effort.as_deref(), Some("max"));
 
         // The rendered TOML the ratify keypress would persist names the provider
         // explicitly — never a provider-scoped ambiguity.
         assert!(content.contains("provider = \"zai\""), "{content}");
         assert!(content.contains("model = \"glm-5.2\""), "{content}");
+        assert!(content.contains("reasoning_effort = \"max\""), "{content}");
 
         // And ratifying commits exactly that route.
         let action = view.handle_key(key(KeyCode::Char('g')));
@@ -1138,6 +1260,7 @@ mod tests {
         };
         assert_eq!(draft.provider.as_deref(), Some("zai"));
         assert_eq!(draft.model.as_deref(), Some("glm-5.2"));
+        assert_eq!(draft.reasoning_effort.as_deref(), Some("max"));
     }
 
     #[test]
@@ -1152,7 +1275,7 @@ mod tests {
         ));
 
         let (title, content) =
-            view.install_model_draft(sample_draft(), "GLM-5.2".to_string(), None);
+            view.install_model_draft(sample_draft(), "GLM-5.2".to_string(), None, None);
         assert!(title.contains("GLM-5.2"));
         assert!(content.contains("id = \"reviewer\""), "{content}");
         assert!(content.contains("Nothing is saved until"), "{content}");
@@ -1170,11 +1293,12 @@ mod tests {
     fn changing_answers_discards_a_stale_draft() {
         let mut view = FleetSetupView::from_snapshot(snapshot());
         to_review(&mut view);
-        let _ = view.install_model_draft(sample_draft(), "GLM-5.2".to_string(), None);
+        let _ = view.install_model_draft(sample_draft(), "GLM-5.2".to_string(), None, None);
         assert!(view.model_draft.is_some());
 
         // Back to the role step and change the selection: the draft no
         // longer matches the answers and must not survive to ratification.
+        view.handle_key(key(KeyCode::Left));
         view.handle_key(key(KeyCode::Left));
         view.handle_key(key(KeyCode::Left));
         assert_eq!(view.step, Step::Role);
@@ -1203,9 +1327,17 @@ mod tests {
         assert_eq!(view.model_idx, 1);
 
         view.handle_key(key(KeyCode::Enter));
+        assert_eq!(view.step, Step::Thinking);
+
+        view.handle_key(key(KeyCode::Down));
+        assert_eq!(view.thinking_idx, 1);
+
+        view.handle_key(key(KeyCode::Enter));
         assert_eq!(view.step, Step::Review);
 
         // Left steps back through the wizard.
+        view.handle_key(key(KeyCode::Left));
+        assert_eq!(view.step, Step::Thinking);
         view.handle_key(key(KeyCode::Left));
         assert_eq!(view.step, Step::Model);
         view.handle_key(key(KeyCode::Left));
@@ -1229,6 +1361,10 @@ mod tests {
         view.handle_key(key(KeyCode::Enter)); // -> Model
         // Model: inherit(0) deepseek-v4-pro(1) -> deepseek-v4-pro.
         view.handle_key(key(KeyCode::Down));
+        view.handle_key(key(KeyCode::Enter)); // -> Thinking
+        while view.selected_reasoning_effort().as_deref() != Some("max") {
+            view.handle_key(key(KeyCode::Down));
+        }
         view.handle_key(key(KeyCode::Enter)); // -> Review
 
         // Start previews inline (#4093: no separate pager to steal the next
@@ -1245,6 +1381,7 @@ mod tests {
         assert!(content.contains("id = \"builder\""));
         assert!(content.contains("role_hint = \"builder\""));
         assert!(content.contains("model = \"deepseek-v4-pro\""));
+        assert!(content.contains("reasoning_effort = \"max\""));
         // A concrete cross-provider route pin names its own provider
         // explicitly (#4093) — the saved profile must not be ambiguously
         // scoped to whatever provider happens to be active at launch time.
@@ -1269,6 +1406,7 @@ mod tests {
         assert_eq!(draft.role_hint, "builder");
         assert_eq!(draft.model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(draft.provider.as_deref(), Some("deepseek"));
+        assert_eq!(draft.reasoning_effort.as_deref(), Some("max"));
     }
 
     #[test]
@@ -1281,8 +1419,10 @@ mod tests {
         let draft = view.model_draft.as_deref().expect("draft installed");
         assert_eq!(draft.model, None);
         assert_eq!(draft.provider, None);
+        assert_eq!(draft.reasoning_effort, None);
         let content = view.model_draft_preview.as_deref().unwrap();
         assert!(!content.contains("provider"), "{content}");
+        assert!(!content.contains("reasoning_effort"), "{content}");
     }
 
     #[test]

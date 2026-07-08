@@ -2119,10 +2119,18 @@ async fn run_event_loop(
             .try_lock()
             .ok()
             .and_then(|mut guard| guard.take());
-        if let Some((draft_gen, model_label, picked_route, outcome)) = fleet_draft_delivery
+        if let Some((draft_gen, model_label, picked_route, reasoning_effort, outcome)) =
+            fleet_draft_delivery
             && draft_gen == app.current_draft_gen()
         {
-            deliver_fleet_draft_result(app, model_label, picked_route, outcome, app.ui_locale);
+            deliver_fleet_draft_result(
+                app,
+                model_label,
+                picked_route,
+                reasoning_effort,
+                outcome,
+                app.ui_locale,
+            );
         }
 
         // Poll the constitution model-draft cell (same background pattern).
@@ -5757,6 +5765,7 @@ async fn handle_fleet_profile_model_draft(
     role: String,
     model: String,
     provider: Option<String>,
+    reasoning_effort: Option<String>,
     locale: crate::localization::Locale,
 ) {
     // The route the operator actually picked at `m`-press time (#4093). A
@@ -5779,6 +5788,7 @@ async fn handle_fleet_profile_model_draft(
                 app,
                 model_label.clone(),
                 picked_route.clone(),
+                reasoning_effort.clone(),
                 Err(format!("provider not ready: {err:#}")),
                 locale,
             );
@@ -5830,7 +5840,13 @@ async fn handle_fleet_profile_model_draft(
             Ok(result) => result,
         };
         if let Ok(mut guard) = cell.lock() {
-            *guard = Some((request_gen, spawn_label, picked_route, outcome));
+            *guard = Some((
+                request_gen,
+                spawn_label,
+                picked_route,
+                reasoning_effort,
+                outcome,
+            ));
         }
     });
 }
@@ -5848,6 +5864,7 @@ fn deliver_fleet_draft_result(
     app: &mut App,
     model_label: String,
     picked_route: Option<(String, String)>,
+    reasoning_effort: Option<String>,
     outcome: Result<Box<crate::fleet::profile::FleetProfileDraft>, String>,
     locale: crate::localization::Locale,
 ) {
@@ -5860,7 +5877,12 @@ fn deliver_fleet_draft_result(
                     .as_any_mut()
                     .downcast_mut::<crate::tui::views::fleet_setup::FleetSetupView>()
                     .map(|wizard| {
-                        wizard.install_model_draft(draft, model_label.clone(), picked_route.clone())
+                        wizard.install_model_draft(
+                            draft,
+                            model_label.clone(),
+                            picked_route.clone(),
+                            reasoning_effort.clone(),
+                        )
                     })
                     .is_some();
                 app.view_stack.push_boxed(boxed);
@@ -10445,9 +10467,19 @@ async fn handle_view_events(
                 role,
                 model,
                 provider,
+                reasoning_effort,
                 locale,
             } => {
-                handle_fleet_profile_model_draft(app, config, role, model, provider, locale).await;
+                handle_fleet_profile_model_draft(
+                    app,
+                    config,
+                    role,
+                    model,
+                    provider,
+                    reasoning_effort,
+                    locale,
+                )
+                .await;
             }
             ViewEvent::FleetRosterOpenSetupRequested => {
                 // The roster view hands off to the authoring wizard (same

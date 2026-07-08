@@ -2118,6 +2118,9 @@ pub struct App {
                 // the model draft (which is always `provider: None`) omitted or
                 // changed it. `None` for an `inherit` pick.
                 Option<(String, String)>,
+                // The reasoning tier selected when the operator pressed `m`
+                // (#4137). `None` means inherit.
+                Option<String>,
                 Result<Box<crate::fleet::profile::FleetProfileDraft>, String>,
             )>,
         >,

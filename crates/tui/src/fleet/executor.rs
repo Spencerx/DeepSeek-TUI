@@ -27,7 +27,8 @@ use codewhale_protocol::fleet::{FleetHostSpec, FleetTaskSpec, FleetWorkerEventPa
 use super::host::{FleetHostAdapter, FleetWorkerCommand};
 use super::profile::AgentProfile;
 use super::worker_runtime::{
-    fleet_task_prompt, fleet_task_prompt_with_profiles, fleet_worker_launch_route,
+    fleet_task_prompt, fleet_task_prompt_with_profiles, fleet_worker_launch_reasoning_effort,
+    fleet_worker_launch_route,
 };
 
 /// Build the `codewhale exec` argv that runs a fleet task headlessly.
@@ -57,6 +58,7 @@ pub fn build_worker_exec_command(
         exec_config,
         model,
         None,
+        None,
     )
 }
 
@@ -79,12 +81,14 @@ pub fn build_worker_exec_command_with_profiles(
 ) -> Result<FleetWorkerCommand> {
     let (worker_model, worker_provider) =
         fleet_worker_launch_route(task_spec, agent_profiles, model.unwrap_or_default());
+    let worker_reasoning_effort = fleet_worker_launch_reasoning_effort(task_spec, agent_profiles);
     Ok(build_worker_exec_command_from_prompt(
         codewhale_binary,
         fleet_task_prompt_with_profiles(task_spec, agent_profiles)?,
         exec_config,
         Some(worker_model.as_str()),
         worker_provider.as_deref(),
+        worker_reasoning_effort.as_deref(),
     ))
 }
 
@@ -94,6 +98,7 @@ fn build_worker_exec_command_from_prompt(
     exec_config: &FleetExecConfig,
     model: Option<&str>,
     provider: Option<&str>,
+    reasoning_effort: Option<&str>,
 ) -> FleetWorkerCommand {
     let mut args: Vec<String> = vec![
         "exec".to_string(),
@@ -114,6 +119,14 @@ fn build_worker_exec_command_from_prompt(
     if let Some(provider) = provider.map(str::trim).filter(|p| !p.is_empty()) {
         args.push("--provider".to_string());
         args.push(provider.to_string());
+    }
+
+    // Non-secret thinking tier only (#4137). This is profile metadata and
+    // follows the same explicit-only policy as provider: omit it when the
+    // worker profile inherits the session/default reasoning setting.
+    if let Some(reasoning_effort) = reasoning_effort.map(str::trim).filter(|e| !e.is_empty()) {
+        args.push("--reasoning-effort".to_string());
+        args.push(reasoning_effort.to_string());
     }
 
     if !exec_config.allowed_tools.is_empty() {
@@ -467,6 +480,7 @@ mod tests {
                 loadout: FleetLoadout::Inherit,
                 model: None,
                 provider: None,
+                reasoning_effort: None,
                 permissions: FleetProfilePermissions::default(),
                 delegation: FleetDelegationHints::default(),
             },
@@ -531,9 +545,10 @@ mod tests {
 
     /// #4093 AC #4 at the LAUNCH boundary (not just the receipt): a worker whose
     /// profile pins a DIFFERENT provider+model than the parent session must
-    /// actually launch on the profile's route. The parent session is DeepSeek
-    /// here (`--model deepseek-v4-pro`); the profile pins OpenRouter + glm-5.2.
-    /// The emitted argv must carry OpenRouter's id and the profile's model as
+    /// actually launch on the profile's route and saved reasoning tier. The
+    /// parent session is DeepSeek here (`--model deepseek-v4-pro`); the profile
+    /// pins OpenRouter + glm-5.2 + max thinking. The emitted argv must carry
+    /// OpenRouter's id, the profile's model, and the profile's thinking tier as
     /// paired flag/values — never the parent's model. This is the gap the
     /// save→load→resolve receipt tests never covered.
     #[test]
@@ -544,6 +559,7 @@ mod tests {
         let mut profile = agent_profile("cross", "scout", "Read first.");
         profile.profile.provider = Some("openrouter".to_string());
         profile.profile.model = Some("glm-5.2".to_string());
+        profile.profile.reasoning_effort = Some("max".to_string());
 
         let cmd = build_worker_exec_command_with_profiles(
             "codewhale",
@@ -578,6 +594,17 @@ mod tests {
             "{:?}",
             cmd.args
         );
+        let reasoning_idx = cmd
+            .args
+            .iter()
+            .position(|a| a == "--reasoning-effort")
+            .expect("--reasoning-effort must be present for a thinking-pinned worker");
+        assert_eq!(
+            cmd.args.get(reasoning_idx + 1).map(String::as_str),
+            Some("max"),
+            "{:?}",
+            cmd.args
+        );
 
         // The parent/session model must NOT leak onto the argv.
         assert!(
@@ -604,6 +631,11 @@ mod tests {
         assert!(
             !cmd.args.iter().any(|a| a == "--provider"),
             "profile-less worker must not carry --provider: {:?}",
+            cmd.args
+        );
+        assert!(
+            !cmd.args.iter().any(|a| a == "--reasoning-effort"),
+            "profile-less worker must not carry --reasoning-effort: {:?}",
             cmd.args
         );
         let model_idx = cmd

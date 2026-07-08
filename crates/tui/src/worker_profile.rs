@@ -133,6 +133,9 @@ pub struct WorkerRuntimeProfile {
     pub model: ModelRoute,
     /// Explicit provider override; `None` inherits the parent/session provider.
     pub provider: Option<String>,
+    /// Explicit reasoning/thinking tier; `None` inherits the parent/session tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// Remaining nested-delegation budget. A worker may spawn children while
     /// `max_spawn_depth > 0`; each level decrements it. Clamped to the workspace
     /// ceiling.
@@ -170,6 +173,7 @@ impl WorkerRuntimeProfile {
             tools: ToolScope::Inherit,
             model: ModelRoute::Inherit,
             provider: None,
+            reasoning_effort: None,
             max_spawn_depth: codewhale_config::DEFAULT_SPAWN_DEPTH,
             background: true,
         }
@@ -219,6 +223,10 @@ impl WorkerRuntimeProfile {
             tools,
             model: requested.model.clone(),
             provider: requested.provider.clone().or_else(|| self.provider.clone()),
+            reasoning_effort: requested
+                .reasoning_effort
+                .clone()
+                .or_else(|| self.reasoning_effort.clone()),
             max_spawn_depth,
             background: requested.background,
         }
@@ -359,5 +367,20 @@ mod tests {
         let requested = WorkerRuntimeProfile::for_role(SubAgentType::Explore); // provider None
         let child = parent.derive_child(&requested);
         assert_eq!(child.provider.as_deref(), Some("moonshot"));
+    }
+
+    #[test]
+    fn child_reasoning_effort_uses_requested_then_parent() {
+        let mut parent = WorkerRuntimeProfile::for_role(SubAgentType::General);
+        parent.reasoning_effort = Some("low".to_string());
+
+        let requested = WorkerRuntimeProfile::for_role(SubAgentType::Explore);
+        let inherited = parent.derive_child(&requested);
+        assert_eq!(inherited.reasoning_effort.as_deref(), Some("low"));
+
+        let mut requested = WorkerRuntimeProfile::for_role(SubAgentType::Explore);
+        requested.reasoning_effort = Some("max".to_string());
+        let overridden = parent.derive_child(&requested);
+        assert_eq!(overridden.reasoning_effort.as_deref(), Some("max"));
     }
 }

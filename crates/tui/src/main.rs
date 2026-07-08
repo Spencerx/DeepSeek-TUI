@@ -348,6 +348,10 @@ struct ExecArgs {
     /// one (#4093).
     #[arg(long)]
     provider: Option<String>,
+    /// Override reasoning/thinking effort for this run.
+    /// Accepted values: auto, off, low, medium, high, max.
+    #[arg(long = "reasoning-effort", value_name = "EFFORT")]
+    reasoning_effort: Option<String>,
     /// Enable tool-backed agent mode with auto-approvals
     #[arg(long, default_value_t = false)]
     auto: bool,
@@ -1286,6 +1290,14 @@ async fn main() -> Result<()> {
                         );
                     };
                     config.provider = Some(provider.as_str().to_string());
+                }
+                if let Some(reasoning_arg) = args
+                    .reasoning_effort
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    config.reasoning_effort = normalize_cli_reasoning_effort(reasoning_arg)?;
                 }
                 let model = resolve_exec_model(&config, args.model.as_deref());
                 let prompt = join_prompt_parts(&args.prompt);
@@ -7221,6 +7233,26 @@ fn cli_reasoning_effort_value(
         .map(str::to_string)
 }
 
+fn normalize_cli_reasoning_effort(value: &str) -> Result<Option<String>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let normalized = match trimmed.to_ascii_lowercase().as_str() {
+        "inherit" | "parent" | "same" | "current" | "default" | "unset" => return Ok(None),
+        "off" | "disabled" | "none" | "false" => "off",
+        "low" | "minimal" => "low",
+        "medium" | "mid" => "medium",
+        "high" => "high",
+        "auto" | "automatic" => "auto",
+        "max" | "maximum" | "xhigh" | "ultracode" => "max",
+        _ => bail!(
+            "Unrecognized --reasoning-effort {trimmed:?}. Expected: auto, off, low, medium, high, max, or default."
+        ),
+    };
+    Ok(Some(normalized.to_string()))
+}
+
 fn config_for_cli_route(config: &Config, route: &CliAutoRoute) -> Config {
     let mut execution_config = config.clone();
     execution_config.provider = Some(route.provider.as_str().to_string());
@@ -9436,6 +9468,39 @@ mod terminal_mode_tests {
             crate::config::ApiProvider::parse(args.provider.as_deref().unwrap()),
             Some(crate::config::ApiProvider::Openrouter)
         );
+    }
+
+    #[test]
+    fn exec_parses_reasoning_effort_flag_alongside_provider() {
+        let cli = parse_cli(&[
+            "codewhale",
+            "exec",
+            "--provider",
+            "openrouter",
+            "--model",
+            "glm-5.2",
+            "--reasoning-effort",
+            "max",
+            "audit",
+        ]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+
+        assert_eq!(args.provider.as_deref(), Some("openrouter"));
+        assert_eq!(args.model.as_deref(), Some("glm-5.2"));
+        assert_eq!(args.reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(args.prompt, vec!["audit"]);
+    }
+
+    #[test]
+    fn cli_reasoning_effort_normalizes_aliases_and_rejects_typos() {
+        assert_eq!(
+            normalize_cli_reasoning_effort("xhigh").unwrap().as_deref(),
+            Some("max")
+        );
+        assert_eq!(normalize_cli_reasoning_effort("default").unwrap(), None);
+        assert!(normalize_cli_reasoning_effort("expensive").is_err());
     }
 
     #[test]

@@ -77,6 +77,7 @@ pub fn fleet_task_to_worker_spec_with_profiles(
     );
     requested_runtime.provider =
         explicit_fleet_provider(agent_profile).map(|provider| provider.as_str().to_string());
+    requested_runtime.reasoning_effort = effective_fleet_reasoning_effort(agent_profile);
     if let Some(agent_profile) = agent_profile
         && let Some(profile_depth) = agent_profile.profile.delegation.max_spawn_depth
     {
@@ -181,9 +182,7 @@ pub(crate) fn resolve_fleet_route(
             ))
             .to_string(),
         ),
-        // The offline resolver path does not know the concrete sub-agent
-        // thinking tier. Leave it absent rather than fabricating one.
-        reasoning_effort: None,
+        reasoning_effort: effective_fleet_reasoning_effort(agent_profile),
         role_source: role_source.map(str::to_string),
         loadout_source: loadout_source.map(str::to_string),
         model_class_source: model_class_source.map(str::to_string),
@@ -456,6 +455,31 @@ pub(crate) fn explicit_fleet_provider(agent_profile: Option<&AgentProfile>) -> O
     agent_profile
         .and_then(|profile| profile.profile.provider.as_deref())
         .and_then(ApiProvider::parse)
+}
+
+pub(crate) fn effective_fleet_reasoning_effort(
+    agent_profile: Option<&AgentProfile>,
+) -> Option<String> {
+    agent_profile
+        .and_then(|profile| profile.profile.reasoning_effort.as_deref())
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .map(str::to_string)
+}
+
+/// The explicit reasoning/thinking tier a fleet worker should launch with.
+///
+/// This is the launch-side twin of the receipt/runtime-profile field: it reads
+/// only the resolved AgentProfile tier, so task model overrides can change the
+/// model without accidentally inventing a thinking tier.
+pub(crate) fn fleet_worker_launch_reasoning_effort(
+    task_spec: &FleetTaskSpec,
+    agent_profiles: &[AgentProfile],
+) -> Option<String> {
+    let agent_profile = resolve_task_agent_profile(task_spec, agent_profiles)
+        .ok()
+        .flatten();
+    effective_fleet_reasoning_effort(agent_profile)
 }
 
 /// The route (model selector + optional explicit provider id) that a fleet
@@ -832,6 +856,7 @@ mod tests {
                 loadout,
                 model: None,
                 provider: None,
+                reasoning_effort: None,
                 permissions: codewhale_config::FleetProfilePermissions::default(),
                 delegation: codewhale_config::FleetDelegationHints::default(),
             },
@@ -1290,6 +1315,7 @@ mod tests {
         );
         profile.profile.model = Some("deepseek-v4-flash".to_string());
         profile.profile.provider = Some("openrouter".to_string());
+        profile.profile.reasoning_effort = Some("max".to_string());
         let task = fleet_task(
             "route-cross-provider",
             Some(worker_profile(
@@ -1331,6 +1357,7 @@ mod tests {
             route.provider_kind,
             openrouter_candidate.provider_kind.as_str()
         );
+        assert_eq!(route.reasoning_effort.as_deref(), Some("max"));
         // Differs from DeepSeek — the pre-#4093 hardcoded default AND the
         // parent/session's provider.
         assert_ne!(route.provider_id, "deepseek");
@@ -1351,6 +1378,7 @@ mod tests {
             model_class_hint: None,
             model: Some("deepseek-v4-flash".to_string()),
             provider: Some("openrouter".to_string()),
+            reasoning_effort: Some("max".to_string()),
             instructions: None,
         };
 
@@ -1360,6 +1388,7 @@ mod tests {
             .expect("rendered profile TOML loads");
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].profile.provider.as_deref(), Some("openrouter"));
+        assert_eq!(profiles[0].profile.reasoning_effort.as_deref(), Some("max"));
         assert_eq!(
             profiles[0].profile.model.as_deref(),
             Some("deepseek-v4-flash")
@@ -1395,6 +1424,7 @@ mod tests {
             openrouter_candidate.wire_model_id.as_str()
         );
         assert_eq!(route.provider_id, openrouter_candidate.provider_id.as_str());
+        assert_eq!(route.reasoning_effort.as_deref(), Some("max"));
         assert_ne!(route.provider_id, "deepseek");
     }
 
@@ -1414,6 +1444,7 @@ mod tests {
         );
         pinned.profile.model = Some("glm-5.2".to_string());
         pinned.profile.provider = Some("openrouter".to_string());
+        pinned.profile.reasoning_effort = Some("high".to_string());
         let pinned_task = fleet_task(
             "launch-pinned",
             Some(worker_profile(
@@ -1425,10 +1456,15 @@ mod tests {
                 vec![],
             )),
         );
+        let pinned_profiles = vec![pinned];
         let (model, provider) =
-            fleet_worker_launch_route(&pinned_task, &[pinned], "deepseek-v4-pro");
+            fleet_worker_launch_route(&pinned_task, &pinned_profiles, "deepseek-v4-pro");
         assert_eq!(model, "glm-5.2");
         assert_eq!(provider.as_deref(), Some("openrouter"));
+        assert_eq!(
+            fleet_worker_launch_reasoning_effort(&pinned_task, &pinned_profiles).as_deref(),
+            Some("high")
+        );
 
         // 2) A DeepSeek-shaped model with NO explicit provider must NOT infer a
         //    provider — provider stays None so the worker keeps its own session
@@ -1451,10 +1487,15 @@ mod tests {
                 vec![],
             )),
         );
+        let model_only_profiles = vec![model_only];
         let (model, provider) =
-            fleet_worker_launch_route(&model_only_task, &[model_only], "deepseek-v4-pro");
+            fleet_worker_launch_route(&model_only_task, &model_only_profiles, "deepseek-v4-pro");
         assert_eq!(model, "deepseek-v4-flash");
         assert_eq!(provider, None);
+        assert_eq!(
+            fleet_worker_launch_reasoning_effort(&model_only_task, &model_only_profiles),
+            None
+        );
 
         // 3) No profile at all: run-level model, no provider (unchanged).
         let bare = fleet_task("launch-bare", None);
@@ -1572,6 +1613,7 @@ mod tests {
         );
         profile.profile.model = Some("deepseek-v4-flash".to_string());
         profile.profile.provider = Some("openrouter".to_string());
+        profile.profile.reasoning_effort = Some("max".to_string());
         let task = fleet_task(
             "scout",
             Some(worker_profile(
@@ -1594,6 +1636,7 @@ mod tests {
         };
         let mut parent = WorkerRuntimeProfile::for_role(SubAgentType::General);
         parent.provider = Some("deepseek".to_string());
+        parent.reasoning_effort = Some("low".to_string());
         parent.max_spawn_depth = 3;
 
         let spec = fleet_task_to_worker_spec_with_profiles(
@@ -1614,6 +1657,10 @@ mod tests {
             ModelRoute::Fixed("deepseek-v4-flash".to_string())
         );
         assert_eq!(spec.runtime_profile.provider.as_deref(), Some("openrouter"));
+        assert_eq!(
+            spec.runtime_profile.reasoning_effort.as_deref(),
+            Some("max")
+        );
         assert_eq!(spec.runtime_profile.max_spawn_depth, 2);
     }
 

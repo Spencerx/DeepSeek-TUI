@@ -195,6 +195,7 @@ impl FleetRoster {
                 loadout,
                 model: None,
                 provider: None,
+                reasoning_effort: None,
                 permissions: FleetProfilePermissions::default(),
                 delegation: FleetDelegationHints::default(),
             },
@@ -278,6 +279,7 @@ mod tests {
             loadout: FleetLoadout::Inherit,
             model: model.map(str::to_string),
             provider: None,
+            reasoning_effort: None,
             permissions: FleetProfilePermissions::default(),
             delegation: FleetDelegationHints::default(),
         }

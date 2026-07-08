@@ -685,6 +685,11 @@ pub enum ViewEvent {
         /// keeps the picked provider instead of collapsing to an ambiguous,
         /// provider-scoped profile — the exact bug #4093 fixes.
         provider: Option<String>,
+        /// Canonical reasoning tier selected by the wizard, or `None` for
+        /// inherit (#4137). Carried with the async draft for the same reason
+        /// as `provider`: the ratified profile must preserve the operator's
+        /// explicit choice, not whatever the model echoed.
+        reasoning_effort: Option<String>,
         locale: crate::localization::Locale,
     },
     /// Emitted by the `/fleet` roster view (`s` / Enter) to hand off to the

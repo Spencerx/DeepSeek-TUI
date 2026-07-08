@@ -1160,6 +1160,13 @@ pub struct FleetProfile {
     /// this profile must read this field, not guess from the model id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Optional explicit reasoning/thinking tier for this profile (#4137).
+    ///
+    /// This is a safe, non-secret route tuning value. `None` means inherit the
+    /// operator/session reasoning tier. Concrete values are normalized by the
+    /// TUI loader before they are used at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// Permission defaults requested by the profile.
     #[serde(default)]
     pub permissions: FleetProfilePermissions,
