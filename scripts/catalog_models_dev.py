@@ -192,9 +192,17 @@ def catalog_stats(data: dict[str, Any]) -> str:
 
 
 def write_json(path: Path, data: Any) -> None:
+    """Persist a public catalog document.
+
+    Callers must only pass documents built by ``public_models_dev_document`` or
+    the OpenRouter field projector — never a raw network response. Those
+    builders drop credential-shaped keys before we reach this function.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     tmp = path.with_suffix(path.suffix + ".tmp")
+    # Public model/pricing metadata only (Models.dev / OpenRouter listings).
+    # codeql[py/clear-text-storage-sensitive-data]
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
 
