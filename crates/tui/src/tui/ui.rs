@@ -52,7 +52,7 @@ use crate::commands;
 use crate::compaction::estimate_input_tokens_conservative;
 use crate::config::{
     ApiProvider, Config, ProviderConfig, ProvidersConfig, StatusItem, UpdateConfig,
-    provider_capability, save_provider_auth_mode_for,
+    provider_capability, save_provider_auth_mode_for_at,
 };
 use crate::config_ui::{self, ConfigUiMode, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
@@ -4057,18 +4057,18 @@ async fn run_event_loop(
                         if key.modifiers == KeyModifiers::NONE
                             || key.modifiers == KeyModifiers::SHIFT =>
                     {
-                        if let Some(panel) = app.workflow_panel.as_mut() {
-                            if panel.handle_key(ch) {
-                                if matches!(ch, 'c' | 'C' | 'x' | 'X') {
-                                    if let Some(run_id) = panel.take_cancel_emit() {
-                                        app.status_message = Some(format!(
-                                            "Cancelling workflow {run_id}… (dispatch via /workflow cancel {run_id})"
-                                        ));
-                                    }
-                                }
-                                app.needs_redraw = true;
-                                handled = true;
+                        if let Some(panel) = app.workflow_panel.as_mut()
+                            && panel.handle_key(ch)
+                        {
+                            if matches!(ch, 'c' | 'C' | 'x' | 'X')
+                                && let Some(run_id) = panel.take_cancel_emit()
+                            {
+                                app.status_message = Some(format!(
+                                    "Cancelling workflow {run_id}… (dispatch via /workflow cancel {run_id})"
+                                ));
                             }
+                            app.needs_redraw = true;
+                            handled = true;
                         }
                     }
                     _ => {}
@@ -8486,6 +8486,9 @@ async fn apply_command_result(
                     app.status_message = Some("Provider setup catalog opened.".to_string());
                 }
             }
+            AppAction::StartXaiDeviceLogin => {
+                run_xai_device_login_from_tui(terminal, app, engine_handle, config).await?;
+            }
             AppAction::OpenModePicker => {
                 if app.view_stack.top_kind() != Some(ModalKind::ModePicker) {
                     app.view_stack
@@ -9671,6 +9674,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
             crate::config::ApiProvider::Minimax => Some("MiniMax"),
             crate::config::ApiProvider::Sakana => Some("Sakana"),
             crate::config::ApiProvider::LongCat => Some("Meituan LongCat"),
+            crate::config::ApiProvider::Meta => Some("Meta"),
             crate::config::ApiProvider::Xai => Some("xAI"),
             crate::config::ApiProvider::Custom => Some("Custom"),
         };
@@ -10935,6 +10939,9 @@ async fn handle_view_events(
                 )
                 .await;
             }
+            ViewEvent::ProviderPickerXaiOAuthRequested => {
+                run_xai_device_login_from_tui(terminal, app, engine_handle, config).await?;
+            }
             ViewEvent::ProviderPickerOpenModels {
                 provider,
                 provider_id,
@@ -11648,6 +11655,7 @@ fn mirror_saved_api_key_in_config(config: &mut Config, provider: ApiProvider, ap
         ApiProvider::Minimax => &mut providers.minimax,
         ApiProvider::Sakana => &mut providers.sakana,
         ApiProvider::LongCat => &mut providers.longcat,
+        ApiProvider::Meta => &mut providers.meta,
         ApiProvider::Xai => &mut providers.xai,
     };
     entry.api_key = Some(api_key);
@@ -11661,7 +11669,7 @@ async fn apply_provider_picker_auth_mode(
     auth_mode: &str,
     status_prefix: &str,
 ) {
-    match save_provider_auth_mode_for(provider, auth_mode) {
+    match save_provider_auth_mode_for_at(provider, auth_mode, app.config_path.as_deref()) {
         Ok(path) => {
             set_provider_auth_mode_in_memory(config, provider, auth_mode.to_string());
             app.status_message = Some(format!("{status_prefix}; saved to {}", path.display()));
@@ -11679,6 +11687,51 @@ async fn apply_provider_picker_auth_mode(
     }
 
     switch_provider(app, engine_handle, config, provider, None).await;
+}
+
+async fn run_xai_device_login_from_tui(
+    terminal: &mut AppTerminal,
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+) -> Result<()> {
+    pause_terminal(
+        terminal,
+        app.use_alt_screen,
+        app.use_mouse_capture,
+        app.use_bracketed_paste,
+    )?;
+    let login_result = tokio::task::block_in_place(crate::xai_oauth::device_code_login);
+    resume_terminal(
+        terminal,
+        app.use_alt_screen,
+        app.use_mouse_capture,
+        app.use_bracketed_paste,
+        app.synchronized_output_enabled,
+    )?;
+
+    match login_result {
+        Ok(_) => {
+            apply_provider_picker_auth_mode(
+                app,
+                engine_handle,
+                config,
+                ApiProvider::Xai,
+                "oauth",
+                "xAI device login complete",
+            )
+            .await;
+        }
+        Err(err) => {
+            let message = format!("xAI device login failed: {err}");
+            app.add_message(HistoryCell::System {
+                content: message.clone(),
+            });
+            app.status_message = Some(message);
+        }
+    }
+    app.needs_redraw = true;
+    Ok(())
 }
 
 fn set_provider_auth_mode_in_memory(config: &mut Config, provider: ApiProvider, auth_mode: String) {
@@ -11727,6 +11780,7 @@ fn set_provider_auth_mode_in_memory(config: &mut Config, provider: ApiProvider, 
         ApiProvider::Minimax => &mut providers.minimax,
         ApiProvider::Sakana => &mut providers.sakana,
         ApiProvider::LongCat => &mut providers.longcat,
+        ApiProvider::Meta => &mut providers.meta,
         ApiProvider::Xai => &mut providers.xai,
     };
     entry.auth_mode = Some(auth_mode);
