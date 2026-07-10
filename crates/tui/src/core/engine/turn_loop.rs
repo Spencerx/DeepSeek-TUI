@@ -596,6 +596,7 @@ impl Engine {
                 model: self.session.model.clone(),
                 messages: self.messages_with_turn_metadata(),
                 max_tokens: effective_max_output_tokens_for_route(
+                    self.api_provider,
                     &self.session.model,
                     self.active_route_limits,
                 ),
@@ -2508,8 +2509,10 @@ impl Engine {
                             "tool_name": outcome.name.clone(),
                             "success": output.success,
                         }));
-                        let output_for_context = compact_tool_result_for_context(
+                        let output_for_context = compact_tool_result_for_route(
+                            self.api_provider,
                             &self.session.model,
+                            self.active_route_limits,
                             &outcome.name,
                             &output,
                         );

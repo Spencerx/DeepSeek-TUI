@@ -2925,6 +2925,85 @@ mod tests {
     }
 
     #[test]
+    fn empty_provider_headers_do_not_mark_provider_configured() {
+        let _env = crate::test_support::lock_test_env();
+        let _anthropic_key = crate::test_support::EnvVarGuard::remove("ANTHROPIC_API_KEY");
+        let config = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                anthropic: crate::config::ProviderConfig {
+                    http_headers: Some(std::collections::HashMap::new()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        let anthropic = picker
+            .rows
+            .iter()
+            .find(|row| row.provider == ApiProvider::Anthropic)
+            .expect("anthropic row");
+
+        assert!(
+            !anthropic.is_configured,
+            "an empty deserialized header table is default state, not setup"
+        );
+    }
+
+    #[test]
+    fn non_empty_provider_headers_mark_provider_configured() {
+        let config = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                anthropic: crate::config::ProviderConfig {
+                    http_headers: Some(std::collections::HashMap::from([(
+                        "X-Route".to_string(),
+                        "custom".to_string(),
+                    )])),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        let anthropic = picker
+            .rows
+            .iter()
+            .find(|row| row.provider == ApiProvider::Anthropic)
+            .expect("anthropic row");
+
+        assert!(
+            anthropic.is_configured,
+            "a user-authored header is meaningful explicit provider setup"
+        );
+    }
+
+    #[test]
+    fn blank_provider_header_entries_do_not_mark_provider_configured() {
+        let _env = crate::test_support::lock_test_env();
+        let _anthropic_key = crate::test_support::EnvVarGuard::remove("ANTHROPIC_API_KEY");
+        let config = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                anthropic: crate::config::ProviderConfig {
+                    http_headers: Some(std::collections::HashMap::from([
+                        (" ".to_string(), "value".to_string()),
+                        ("X-Blank".to_string(), "   ".to_string()),
+                    ])),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        assert!(!crate::config::provider_is_configured_for_active(
+            &config,
+            ApiProvider::Anthropic,
+            ApiProvider::Deepseek,
+        ));
+    }
+
+    #[test]
     fn self_hosted_provider_not_auto_configured_without_explicit_setup() {
         // #3830: `has_api_key_for` always reports `true` for self-hosted
         // providers (no auth required to route to them) — that must not, on

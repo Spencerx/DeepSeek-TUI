@@ -78,10 +78,94 @@ fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> Tur
         ended_at: None,
         duration_ms: None,
         usage: None,
+        effective_provider: None,
+        effective_model: None,
         error: None,
         item_ids: Vec::new(),
         steer_count: 0,
     }
+}
+
+#[test]
+fn runtime_compaction_uses_provider_route_context() {
+    let limits = codewhale_config::route::RouteLimits {
+        context_tokens: Some(272_000),
+        input_tokens: None,
+        output_tokens: None,
+    };
+    let config = runtime_compaction_config(
+        ApiProvider::OpenaiCodex,
+        "gpt-5.5",
+        Some(limits),
+        false,
+        false,
+        80.0,
+    );
+
+    assert!(config.enabled);
+    assert_eq!(config.token_threshold, 217_600);
+    assert_eq!(config.effective_context_window, Some(272_000));
+}
+
+#[test]
+fn legacy_turn_record_has_no_invented_route_provenance() {
+    let turn = sample_turn("thr_legacy", "turn_legacy", RuntimeTurnStatus::Completed);
+    let mut value = serde_json::to_value(turn).expect("serialize turn");
+    let object = value.as_object_mut().expect("turn object");
+    object.remove("effective_provider");
+    object.remove("effective_model");
+
+    let restored: TurnRecord = serde_json::from_value(value).expect("deserialize legacy turn");
+    assert_eq!(restored.effective_provider, None);
+    assert_eq!(restored.effective_model, None);
+}
+
+#[tokio::test]
+async fn aggregate_usage_keeps_codex_tokens_without_api_dollar_pricing() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let mut thread = sample_thread("thr_mixed_routes");
+    thread.model = "auto".to_string();
+    manager.store.save_thread(&thread)?;
+
+    let usage = Usage {
+        input_tokens: 10_000,
+        output_tokens: 1_000,
+        ..Usage::default()
+    };
+    let mut deepseek = sample_turn(&thread.id, "turn_deepseek", RuntimeTurnStatus::Completed);
+    deepseek.usage = Some(usage.clone());
+    deepseek.effective_provider = Some(ApiProvider::Deepseek.as_str().to_string());
+    deepseek.effective_model = Some("deepseek-v4-flash".to_string());
+    manager.store.save_turn(&deepseek)?;
+
+    let mut codex = sample_turn(&thread.id, "turn_codex", RuntimeTurnStatus::Completed);
+    codex.usage = Some(usage);
+    codex.effective_provider = Some(ApiProvider::OpenaiCodex.as_str().to_string());
+    codex.effective_model = Some("gpt-5.5".to_string());
+    manager.store.save_turn(&codex)?;
+
+    let report = manager
+        .aggregate_usage(None, None, UsageGroupBy::Provider)
+        .await?;
+    assert_eq!(report.totals.turns, 2);
+    assert_eq!(report.totals.input_tokens, 20_000);
+    assert!(report.totals.cost_usd > 0.0);
+
+    let deepseek_bucket = report
+        .buckets
+        .iter()
+        .find(|bucket| bucket.key == ApiProvider::Deepseek.as_str())
+        .expect("DeepSeek bucket");
+    let codex_bucket = report
+        .buckets
+        .iter()
+        .find(|bucket| bucket.key == ApiProvider::OpenaiCodex.as_str())
+        .expect("Codex bucket");
+    assert!(deepseek_bucket.cost_usd > 0.0);
+    assert_eq!(codex_bucket.cost_usd, 0.0);
+    assert_eq!(codex_bucket.input_tokens, 10_000);
+    assert_eq!(report.totals.cost_usd, deepseek_bucket.cost_usd);
+    Ok(())
 }
 
 fn sample_item(turn_id: &str, item_id: &str, status: TurnItemLifecycleStatus) -> TurnItemRecord {
@@ -111,6 +195,8 @@ async fn install_mock_engine(
         ActiveThreadState {
             engine: harness.handle.clone(),
             active_turn: None,
+            route_provider: ApiProvider::Deepseek,
+            route_model: DEFAULT_TEXT_MODEL.to_string(),
         },
     );
     touch_lru(&mut active.lru, thread_id);
@@ -502,6 +588,8 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
                 auto_approve: true,
                 trust_mode: false,
             }),
+            route_provider: ApiProvider::Deepseek,
+            route_model: DEFAULT_TEXT_MODEL.to_string(),
         },
     );
     active.engines.insert(
@@ -514,6 +602,8 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
                 auto_approve: true,
                 trust_mode: false,
             }),
+            route_provider: ApiProvider::Deepseek,
+            route_model: DEFAULT_TEXT_MODEL.to_string(),
         },
     );
     active.lru.push_back("thr_a".to_string());
@@ -2550,6 +2640,8 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         ended_at: None,
         duration_ms: None,
         usage: None,
+        effective_provider: None,
+        effective_model: None,
         error: None,
         item_ids: vec![completed_item.id.clone(), in_progress_item.id.clone()],
         steer_count: 0,
@@ -2565,6 +2657,8 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         ended_at: None,
         duration_ms: None,
         usage: None,
+        effective_provider: None,
+        effective_model: None,
         error: None,
         item_ids: vec![queued_item.id.clone()],
         steer_count: 0,
@@ -2810,6 +2904,8 @@ fn seed_turns_with_user_messages(
             ended_at: Some(created_at),
             duration_ms: Some(0),
             usage: None,
+            effective_provider: None,
+            effective_model: None,
             error: None,
             item_ids: vec![user_item_id, asst_item_id],
             steer_count: 0,

@@ -14,6 +14,7 @@ pub const DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
 /// models resolve to their own scaled value via
 /// [`compaction_threshold_for_model`] (#664).
 pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: usize = 102_400;
+#[cfg(test)]
 const COMPACTION_THRESHOLD_PERCENT: u32 = 80;
 pub const DEFAULT_AUTO_COMPACT_MAX_CONTEXT_WINDOW_TOKENS: u32 = DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS;
 
@@ -555,6 +556,7 @@ fn explicit_context_window_hint(model_lower: &str) -> Option<u32> {
 /// Derive a compaction token threshold from model context and a caller-supplied
 /// percentage.
 #[must_use]
+#[cfg(test)]
 pub fn compaction_threshold_for_model_at_percent(model: &str, percent: f64) -> usize {
     let Some(window) = context_window_for_model(model) else {
         return DEFAULT_COMPACTION_TOKEN_THRESHOLD;
@@ -574,6 +576,7 @@ pub fn compaction_threshold_for_model_at_percent(model: &str, percent: f64) -> u
 /// configure it. v0.8.64 defaults automatic continuity on for known model
 /// windows up to the V4 1M class while keeping unknown model ids opt-in.
 #[must_use]
+#[cfg(test)]
 pub fn auto_compact_default_for_model(model: &str) -> bool {
     context_window_for_model(model)
         .is_some_and(|window| window <= DEFAULT_AUTO_COMPACT_MAX_CONTEXT_WINDOW_TOKENS)

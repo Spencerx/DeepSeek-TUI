@@ -94,6 +94,23 @@ fn test_tokens_shows_usage_info() {
 }
 
 #[test]
+fn tokens_report_uses_codex_oauth_route_context() {
+    let mut app = create_test_app();
+    app.api_provider = crate::config::ApiProvider::OpenaiCodex;
+    app.set_model_selection("gpt-5.5".to_string());
+    app.active_route_limits = Some(codewhale_config::route::RouteLimits {
+        context_tokens: Some(272_000),
+        input_tokens: None,
+        output_tokens: None,
+    });
+
+    let message = tokens(&mut app).message.expect("tokens report");
+
+    assert!(message.contains("/ 272000"), "{message}");
+    assert!(!message.contains("1050000"), "{message}");
+}
+
+#[test]
 fn test_cost_shows_spending_info() {
     let mut app = create_test_app();
     app.session.session_cost = 0.1234;

@@ -1,7 +1,8 @@
 //! Durable thread/turn/item runtime for the HTTP API and background tasks.
 //!
-//! This module keeps DeepSeek-only execution while exposing Codex-like lifecycle
-//! semantics (threads, turns, items, interrupt/steer, and replayable events).
+//! Execution follows the configured provider route while exposing Codex-like
+//! lifecycle semantics (threads, turns, items, interrupt/steer, and replayable
+//! events).
 
 // Background-task runtime — runs alongside the TUI. Raw stdio prints
 // here would still land in the alt-screen on whichever terminal the
@@ -26,14 +27,16 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::compaction::CompactionConfig;
-use crate::config::{Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS};
+use crate::config::{ApiProvider, Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS};
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
 use crate::core::ops::Op;
-use crate::models::{
-    ContentBlock, Message, SystemPrompt, Usage, auto_compact_default_for_model,
-    compaction_threshold_for_model_at_percent,
+use crate::models::{ContentBlock, Message, SystemPrompt, Usage};
+use crate::route_budget::{
+    auto_compact_default_for_route, compaction_threshold_for_route_at_percent, known_route_limits,
+    route_context_window_tokens,
 };
+use crate::route_runtime::resolve_runtime_route;
 use crate::tools::plan::new_shared_plan_state;
 use crate::tools::subagent::SubAgentStatus;
 use crate::tools::todo::new_shared_todo_list;
@@ -243,6 +246,14 @@ pub struct TurnRecord {
     pub duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Concrete provider selected for this turn. Additive so legacy records
+    /// deserialize without inventing provider provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_provider: Option<String>,
+    /// Concrete wire model selected for this turn (especially important when
+    /// the thread is configured as `auto`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]
@@ -813,18 +824,52 @@ pub struct UsageAggregation {
     pub buckets: Vec<UsageBucket>,
 }
 
-/// Best-effort provider classification from a model name. Used as a grouping
-/// key for `/v1/usage?group_by=provider`. Cost-tracking already runs the
-/// model→pricing→cost path; this only labels the bucket.
-fn provider_label_for_model(model: &str) -> &'static str {
-    if model.starts_with("deepseek-ai/") {
-        "nvidia-nim"
-    } else if model.starts_with("deepseek-") {
-        "deepseek"
-    } else if model.starts_with("openai/") || model.starts_with("anthropic/") {
-        "openrouter"
-    } else {
-        "unknown"
+#[derive(Debug, Clone)]
+struct RuntimeThreadRoute {
+    provider: ApiProvider,
+    model: String,
+    config: Config,
+    limits: Option<codewhale_config::route::RouteLimits>,
+}
+
+fn resolve_runtime_thread_route(
+    config: &Config,
+    provider: ApiProvider,
+    model_selector: Option<&str>,
+) -> Result<RuntimeThreadRoute> {
+    let route = resolve_runtime_route(config, provider, model_selector)
+        .map_err(|reason| anyhow!("Failed to resolve runtime thread route: {reason}"))?;
+    Ok(RuntimeThreadRoute {
+        provider,
+        model: route.model,
+        config: route.config,
+        limits: known_route_limits(route.candidate.limits),
+    })
+}
+
+fn runtime_compaction_config(
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<codewhale_config::route::RouteLimits>,
+    auto_compact: bool,
+    auto_compact_explicit: bool,
+    threshold_percent: f64,
+) -> CompactionConfig {
+    CompactionConfig {
+        enabled: if auto_compact_explicit {
+            auto_compact
+        } else {
+            auto_compact_default_for_route(provider, model, route_limits)
+        },
+        model: model.to_string(),
+        token_threshold: compaction_threshold_for_route_at_percent(
+            provider,
+            model,
+            route_limits,
+            threshold_percent,
+        ),
+        effective_context_window: Some(route_context_window_tokens(provider, model, route_limits)),
+        ..Default::default()
     }
 }
 
@@ -840,6 +885,8 @@ struct ActiveTurnState {
 struct ActiveThreadState {
     engine: EngineHandle,
     active_turn: Option<ActiveTurnState>,
+    route_provider: ApiProvider,
+    route_model: String,
 }
 
 #[derive(Default)]
@@ -927,6 +974,38 @@ impl RuntimeThreadManager {
         self.config.read()
     }
 
+    fn resolved_route_for_thread(
+        &self,
+        config: &Config,
+        thread: &ThreadRecord,
+    ) -> Result<RuntimeThreadRoute> {
+        if !thread.model.trim().eq_ignore_ascii_case("auto") {
+            return resolve_runtime_thread_route(
+                config,
+                config.api_provider(),
+                Some(&thread.model),
+            );
+        }
+
+        let restored = self
+            .store
+            .list_turns_for_thread(&thread.id)?
+            .into_iter()
+            .rev()
+            .find_map(|turn| {
+                let provider = turn
+                    .effective_provider
+                    .as_deref()
+                    .and_then(ApiProvider::parse)?;
+                let model = turn.effective_model?.trim().to_string();
+                (!model.is_empty()).then_some((provider, model))
+            });
+        match restored {
+            Some((provider, model)) => resolve_runtime_thread_route(config, provider, Some(&model)),
+            None => resolve_runtime_thread_route(config, config.api_provider(), None),
+        }
+    }
+
     /// Reload config from an updated Config instance (called after /v1/config/reload).
     pub fn reload_config(&self, new_config: Config) {
         let mut guard = self.config.write();
@@ -939,72 +1018,73 @@ impl RuntimeThreadManager {
     /// `apply_model_and_compaction_update` after a config change, ensuring
     /// running engines pick up the new settings without a restart.
     pub async fn sync_engines_with_config(&self) {
-        let (default_model, compaction_template, stream_chunk_timeout_secs, subagent_cfg) = {
+        let (
+            config,
+            auto_compact,
+            auto_compact_explicit,
+            auto_compact_threshold_percent,
+            stream_chunk_timeout_secs,
+        ) = {
             let cfg = self.read_config();
             let settings = crate::settings::Settings::load().unwrap_or_default();
-            let provider = cfg.api_provider();
-            let auto_compact_enabled =
-                if crate::settings::Settings::auto_compact_explicitly_configured() {
-                    settings.auto_compact
-                } else {
-                    auto_compact_default_for_model(
-                        &cfg.default_text_model.clone().unwrap_or_default(),
-                    )
-                };
-            let compaction = crate::compaction::CompactionConfig {
-                enabled: auto_compact_enabled,
-                model: String::new(), // per-engine, filled below
-                token_threshold: compaction_threshold_for_model_at_percent(
-                    &cfg.default_text_model.clone().unwrap_or_default(),
-                    settings.auto_compact_threshold_percent,
-                ),
-                ..Default::default()
-            };
-            let subagent = (
-                cfg.subagents_enabled_for_provider(provider),
-                cfg.max_subagents_for_provider(provider)
-                    .clamp(1, crate::config::MAX_SUBAGENTS),
-                cfg.launch_concurrency_for_provider(provider),
-                cfg.subagent_max_spawn_depth_for_provider(provider),
-                cfg.subagent_api_timeout_secs_for_provider(provider),
-                cfg.subagent_heartbeat_timeout_secs_for_provider(provider),
-            );
             (
-                cfg.default_text_model.clone().unwrap_or_default(),
-                compaction,
+                cfg.clone(),
+                settings.auto_compact,
+                crate::settings::Settings::auto_compact_explicitly_configured(),
+                settings.auto_compact_threshold_percent,
                 cfg.stream_chunk_timeout_secs(),
-                subagent,
             )
         };
 
-        // Collect engine handles and thread IDs, then release the active lock
-        // before doing any async work (sending Ops, loading thread records).
-        let entries: Vec<(String, EngineHandle)> = {
+        // Keep each already-loaded engine on its actual provider/model route.
+        // `SetModel` cannot swap the provider client; the next `SendMessage`
+        // performs provider activation if a turn explicitly selects another
+        // route.
+        let entries: Vec<(String, EngineHandle, ApiProvider, String)> = {
             let active = self.active.lock().await;
             active
                 .engines
                 .iter()
-                .map(|(id, state)| (id.clone(), state.engine.clone()))
+                .map(|(id, state)| {
+                    (
+                        id.clone(),
+                        state.engine.clone(),
+                        state.route_provider,
+                        state.route_model.clone(),
+                    )
+                })
                 .collect()
         };
 
-        for (thread_id, engine) in entries {
-            let engine_model = self
-                .store
-                .load_thread(&thread_id)
-                .ok()
-                .map(|t| t.model)
-                .unwrap_or_else(|| default_model.clone());
-            let engine_compaction = crate::compaction::CompactionConfig {
-                model: engine_model.clone(),
-                ..compaction_template.clone()
+        for (thread_id, engine, provider, engine_model) in entries {
+            let route = match resolve_runtime_thread_route(&config, provider, Some(&engine_model)) {
+                Ok(route) => route,
+                Err(err) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        provider = provider.as_str(),
+                        model = %engine_model,
+                        error = %err,
+                        "Skipped runtime engine route sync"
+                    );
+                    continue;
+                }
             };
+            let route_limits = route.limits;
+            let engine_compaction = runtime_compaction_config(
+                provider,
+                &route.model,
+                route_limits,
+                auto_compact,
+                auto_compact_explicit,
+                auto_compact_threshold_percent,
+            );
 
             let _ = engine
                 .send(Op::SetModel {
-                    model: engine_model,
+                    model: route.model.clone(),
                     mode: crate::tui::app::AppMode::Agent,
-                    route_limits: None,
+                    route_limits,
                 })
                 .await;
             let _ = engine
@@ -1019,14 +1099,21 @@ impl RuntimeThreadManager {
                 .await;
             let _ = engine
                 .send(Op::SetSubagentRuntimeConfig {
-                    enabled: subagent_cfg.0,
-                    max_subagents: subagent_cfg.1,
-                    launch_concurrency: subagent_cfg.2,
-                    max_spawn_depth: subagent_cfg.3,
-                    api_timeout_secs: subagent_cfg.4,
-                    heartbeat_timeout_secs: subagent_cfg.5,
+                    enabled: config.subagents_enabled_for_provider(provider),
+                    max_subagents: config
+                        .max_subagents_for_provider(provider)
+                        .clamp(1, crate::config::MAX_SUBAGENTS),
+                    launch_concurrency: config.launch_concurrency_for_provider(provider),
+                    max_spawn_depth: config.subagent_max_spawn_depth_for_provider(provider),
+                    api_timeout_secs: config.subagent_api_timeout_secs_for_provider(provider),
+                    heartbeat_timeout_secs: config
+                        .subagent_heartbeat_timeout_secs_for_provider(provider),
                 })
                 .await;
+
+            if let Some(state) = self.active.lock().await.engines.get_mut(&thread_id) {
+                state.route_model = route.model;
+            }
 
             tracing::info!(thread_id = %thread_id, "Synced engine with reloaded config");
         }
@@ -1307,8 +1394,10 @@ impl RuntimeThreadManager {
 
     /// Aggregate token + cost usage across all threads/turns inside the time
     /// range `[since, until]`. Each turn's cost is computed via
-    /// `pricing::calculate_turn_cost_from_usage` using the *thread*'s model
-    /// (turns inherit it). Whalescale#261 / #564.
+    /// provider-aware pricing using each turn's persisted concrete route.
+    /// Legacy turns without provider provenance and providers without an
+    /// authoritative runtime price (including ChatGPT/Codex OAuth) accrue
+    /// tokens but no fabricated dollar cost. Whalescale#261 / #564.
     ///
     /// Buckets are sorted by ascending key for deterministic output. Empty
     /// ranges produce empty `buckets` (never an error).
@@ -1322,7 +1411,6 @@ impl RuntimeThreadManager {
 
         let mut buckets: BTreeMap<String, UsageBucket> = BTreeMap::new();
         let mut totals = UsageTotals::default();
-
         for thread in self.store.list_threads()? {
             let turns = self.store.list_turns_for_thread(&thread.id)?;
             for turn in turns {
@@ -1343,7 +1431,24 @@ impl RuntimeThreadManager {
                 let reasoning = usage.reasoning_tokens.unwrap_or(0) as u64;
                 let input = usage.input_tokens as u64;
                 let output = usage.output_tokens as u64;
-                let cost = crate::pricing::calculate_turn_cost_from_usage(&thread.model, usage)
+                let model = turn
+                    .effective_model
+                    .as_deref()
+                    .filter(|model| !model.trim().is_empty())
+                    .unwrap_or(&thread.model);
+                let provider_label = turn
+                    .effective_provider
+                    .as_deref()
+                    .filter(|provider| !provider.trim().is_empty())
+                    .unwrap_or("unknown");
+                let provider = ApiProvider::parse(provider_label);
+                let cost = provider
+                    .and_then(|provider| {
+                        crate::pricing::calculate_turn_cost_estimate_for_provider(
+                            provider, model, usage,
+                        )
+                    })
+                    .map(|estimate| estimate.usd)
                     .unwrap_or(0.0);
 
                 totals.input_tokens += input;
@@ -1355,8 +1460,8 @@ impl RuntimeThreadManager {
 
                 let key = match group_by {
                     UsageGroupBy::Day => turn.created_at.format("%Y-%m-%d").to_string(),
-                    UsageGroupBy::Model => thread.model.clone(),
-                    UsageGroupBy::Provider => provider_label_for_model(&thread.model).to_string(),
+                    UsageGroupBy::Model => model.to_string(),
+                    UsageGroupBy::Provider => provider_label.to_string(),
                     UsageGroupBy::Thread => thread.id.clone(),
                 };
                 let bucket = buckets.entry(key.clone()).or_insert_with(|| UsageBucket {
@@ -2064,6 +2169,8 @@ impl RuntimeThreadManager {
                     ended_at: Some(now),
                     duration_ms: Some(0),
                     usage: None,
+                    effective_provider: None,
+                    effective_model: None,
                     error: None,
                     item_ids,
                     steer_count: 0,
@@ -2104,6 +2211,59 @@ impl RuntimeThreadManager {
             }
         }
 
+        // Resolve the concrete provider/model before persisting a turn. Auto
+        // routing can fail, and such a failure must not leave a zombie
+        // in-progress record behind.
+        let mode = req
+            .mode
+            .as_deref()
+            .and_then(parse_mode_opt)
+            .unwrap_or_else(|| parse_mode(&thread.mode));
+        let requested_model = req.model.as_deref().unwrap_or(&thread.model).to_string();
+        let auto_model = requested_model.trim().eq_ignore_ascii_case("auto");
+        let cfg_snapshot = self.config.read().clone();
+        let (provider, selected_model, reasoning_effort, verbosity) = {
+            let verbosity = cfg_snapshot.verbosity.clone();
+            if auto_model {
+                let selection = crate::model_routing::resolve_auto_route_with_inventory(
+                    &cfg_snapshot,
+                    &prompt,
+                    "",
+                    "auto",
+                    "auto",
+                )
+                .await?;
+                (
+                    selection.provider,
+                    selection.model,
+                    selection
+                        .reasoning_effort
+                        .map(|effort| effort.as_setting().to_string()),
+                    verbosity,
+                )
+            } else {
+                (
+                    cfg_snapshot.api_provider(),
+                    requested_model,
+                    None,
+                    verbosity,
+                )
+            }
+        };
+        let route = resolve_runtime_thread_route(&cfg_snapshot, provider, Some(&selected_model))?;
+        let model = route.model;
+        let route_limits = route.limits;
+        let settings = crate::settings::Settings::load().unwrap_or_default();
+        let compaction = runtime_compaction_config(
+            provider,
+            &model,
+            route_limits,
+            settings.auto_compact,
+            crate::settings::Settings::auto_compact_explicitly_configured(),
+            settings.auto_compact_threshold_percent,
+        );
+        let show_thinking = settings.show_thinking;
+
         let now = Utc::now();
         let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
         let mut turn = TurnRecord {
@@ -2119,6 +2279,8 @@ impl RuntimeThreadManager {
             ended_at: None,
             duration_ms: None,
             usage: None,
+            effective_provider: Some(provider.as_str().to_string()),
+            effective_model: Some(model.clone()),
             error: None,
             item_ids: Vec::new(),
             steer_count: 0,
@@ -2183,52 +2345,13 @@ impl RuntimeThreadManager {
                 auto_approve: req.auto_approve.unwrap_or(thread.auto_approve),
                 trust_mode: req.trust_mode.unwrap_or(thread.trust_mode),
             });
+            state.route_provider = provider;
+            state.route_model.clone_from(&model);
             touch_lru(&mut active.lru, thread_id);
         }
-
-        // A requested mode override only takes effect when it is an explicit,
-        // recognized mode token. An unrecognized override (e.g. a stray prompt
-        // fragment) must NOT silently change the mode: fall back to the
-        // thread's persisted mode rather than coercing to Agent (#3387).
-        let mode = req
-            .mode
-            .as_deref()
-            .and_then(parse_mode_opt)
-            .unwrap_or_else(|| parse_mode(&thread.mode));
-        let requested_model = req.model.unwrap_or_else(|| thread.model.clone());
-        let auto_model = requested_model.trim().eq_ignore_ascii_case("auto");
-        // Snapshot config to avoid holding RwLockReadGuard across await points.
-        let cfg_snapshot = self.config.read().clone();
-        let (provider, model, reasoning_effort, verbosity) = {
-            let verbosity = cfg_snapshot.verbosity.clone();
-            if auto_model {
-                let selection = crate::model_routing::resolve_auto_route_with_inventory(
-                    &cfg_snapshot,
-                    &prompt,
-                    "",
-                    "auto",
-                    "auto",
-                )
-                .await?;
-                (
-                    selection.provider,
-                    selection.model,
-                    selection
-                        .reasoning_effort
-                        .map(|effort| effort.as_setting().to_string()),
-                    verbosity,
-                )
-            } else {
-                let provider = cfg_snapshot.api_provider();
-                (provider, requested_model, None, verbosity)
-            }
-        };
         let allow_shell = req.allow_shell.unwrap_or(thread.allow_shell);
         let trust_mode = req.trust_mode.unwrap_or(thread.trust_mode);
         let auto_approve = req.auto_approve.unwrap_or(thread.auto_approve);
-        let show_thinking = crate::settings::Settings::load()
-            .unwrap_or_default()
-            .show_thinking;
 
         engine
             .send(Op::SendMessage {
@@ -2236,6 +2359,8 @@ impl RuntimeThreadManager {
                 mode,
                 provider: Some(provider),
                 model: model.clone(),
+                route_limits,
+                compaction: Box::new(compaction),
                 goal_objective: None,
                 goal_token_budget: None,
                 goal_status: crate::tools::goal::GoalStatus::Active,
@@ -2417,14 +2542,19 @@ impl RuntimeThreadManager {
         let mut thread = self.get_thread(thread_id).await?;
         let engine = self.ensure_engine_loaded(&thread).await?;
 
-        {
+        let (route_provider, route_model) = {
             let active = self.active.lock().await;
-            if let Some(active_thread) = active.engines.get(thread_id)
-                && active_thread.active_turn.is_some()
-            {
+            let Some(active_thread) = active.engines.get(thread_id) else {
+                bail!("Thread engine not loaded");
+            };
+            if active_thread.active_turn.is_some() {
                 bail!("Thread already has an active turn");
             }
-        }
+            (
+                active_thread.route_provider,
+                active_thread.route_model.clone(),
+            )
+        };
 
         let now = Utc::now();
         let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
@@ -2443,6 +2573,8 @@ impl RuntimeThreadManager {
             ended_at: None,
             duration_ms: None,
             usage: None,
+            effective_provider: Some(route_provider.as_str().to_string()),
+            effective_model: Some(route_model),
             error: None,
             item_ids: Vec::new(),
             steer_count: 0,
@@ -2541,27 +2673,26 @@ impl RuntimeThreadManager {
             }
         }
 
-        // Snapshot config once to avoid holding RwLockReadGuard across await points.
-        let cfg = self.read_config().clone();
+        // Snapshot and prepare the concrete provider route once so the engine,
+        // route limits, compaction budget, and restored session all agree.
+        let base_config = self.read_config().clone();
+        let route = self.resolved_route_for_thread(&base_config, thread)?;
+        let provider = route.provider;
+        let route_model = route.model;
+        let route_limits = route.limits;
+        let cfg = route.config;
 
-        // Resolve the model-aware auto-compaction default unless the user
-        // persisted an explicit preference.
+        // Resolve the provider-route-aware auto-compaction default unless the
+        // user persisted an explicit preference.
         let settings = crate::settings::Settings::load().unwrap_or_default();
-        let auto_compact_enabled =
-            if crate::settings::Settings::auto_compact_explicitly_configured() {
-                settings.auto_compact
-            } else {
-                auto_compact_default_for_model(&thread.model)
-            };
-        let compaction = CompactionConfig {
-            enabled: auto_compact_enabled,
-            model: thread.model.clone(),
-            token_threshold: compaction_threshold_for_model_at_percent(
-                &thread.model,
-                settings.auto_compact_threshold_percent,
-            ),
-            ..Default::default()
-        };
+        let compaction = runtime_compaction_config(
+            provider,
+            &route_model,
+            route_limits,
+            settings.auto_compact,
+            crate::settings::Settings::auto_compact_explicitly_configured(),
+            settings.auto_compact_threshold_percent,
+        );
         let network_policy = cfg.network.clone().map(|toml_cfg| {
             crate::network_policy::NetworkPolicyDecider::with_default_audit(toml_cfg.into_runtime())
         });
@@ -2569,13 +2700,12 @@ impl RuntimeThreadManager {
             .lsp
             .clone()
             .map(crate::config::LspConfigToml::into_runtime);
-        let provider = cfg.api_provider();
         let max_subagents = cfg
             .max_subagents_for_provider(provider)
             .clamp(1, MAX_SUBAGENTS);
         let engine_cfg = EngineConfig {
-            model: thread.model.clone(),
-            active_route_limits: None,
+            model: route_model.clone(),
+            active_route_limits: route_limits,
             workspace: thread.workspace.clone(),
             allow_shell: thread.allow_shell,
             trust_mode: thread.trust_mode,
@@ -2717,7 +2847,7 @@ impl RuntimeThreadManager {
                     messages: session_messages,
                     system_prompt: sys_prompt,
                     system_prompt_override: thread.system_prompt.is_some(),
-                    model: thread.model.clone(),
+                    model: route_model.clone(),
                     workspace: thread.workspace.clone(),
                     mode: parse_mode(&thread.mode),
                 })
@@ -2732,6 +2862,8 @@ impl RuntimeThreadManager {
             ActiveThreadState {
                 engine: engine.clone(),
                 active_turn: None,
+                route_provider: provider,
+                route_model,
             },
         );
         touch_lru(&mut active.lru, &thread.id);
@@ -3863,13 +3995,17 @@ impl RuntimeThreadManager {
         thread_id: &str,
         engine: EngineHandle,
     ) -> Result<()> {
-        let _ = self.get_thread(thread_id).await?;
+        let thread = self.get_thread(thread_id).await?;
+        let config = self.read_config().clone();
+        let route = self.resolved_route_for_thread(&config, &thread)?;
         let mut active = self.active.lock().await;
         active.engines.insert(
             thread_id.to_string(),
             ActiveThreadState {
                 engine,
                 active_turn: None,
+                route_provider: route.provider,
+                route_model: route.model,
             },
         );
         touch_lru(&mut active.lru, thread_id);

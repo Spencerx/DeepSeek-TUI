@@ -119,6 +119,15 @@ pub fn has_pricing_for_model(model: &str) -> bool {
     pricing_for_model(model).is_some()
 }
 
+/// Return whether the selected provider route exposes authoritative dollar
+/// pricing for this model. ChatGPT/Codex OAuth usage is subscription/account
+/// scoped, so the same model id can be priced on the OpenAI API route while
+/// remaining intentionally unpriced on the OAuth route.
+#[must_use]
+pub fn has_pricing_for_provider(provider: ApiProvider, model: &str) -> bool {
+    provider != ApiProvider::OpenaiCodex && has_pricing_for_model(model)
+}
+
 fn pricing_for_model_at(model: &str, now: DateTime<Utc>) -> Option<ModelPricing> {
     let lower = model.to_lowercase();
     if lower.starts_with("deepseek-ai/") {
@@ -295,6 +304,7 @@ fn deepseek_v4_flash_pricing() -> ModelPricing {
 
 /// Calculate cost from provider usage, honoring DeepSeek context-cache fields.
 #[must_use]
+#[cfg(test)]
 pub fn calculate_turn_cost_from_usage(model: &str, usage: &Usage) -> Option<f64> {
     calculate_turn_cost_estimate_from_usage(model, usage).map(|estimate| estimate.usd)
 }
@@ -542,6 +552,11 @@ mod tests {
         };
 
         assert!(calculate_turn_cost_estimate_from_usage("gpt-5.5", &usage).is_some());
+        assert!(has_pricing_for_provider(ApiProvider::Openai, "gpt-5.5"));
+        assert!(!has_pricing_for_provider(
+            ApiProvider::OpenaiCodex,
+            "gpt-5.5"
+        ));
         assert!(
             calculate_turn_cost_estimate_for_provider(ApiProvider::OpenaiCodex, "gpt-5.5", &usage)
                 .is_none()

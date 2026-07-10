@@ -1107,6 +1107,8 @@ mod tests {
         app.auto_model = false;
         app.api_provider = ApiProvider::Deepseek;
         app.model_ids_passthrough = false;
+        app.active_route_limits = None;
+        app.update_model_compaction_budget();
         app
     }
 

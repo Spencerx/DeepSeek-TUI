@@ -129,6 +129,37 @@ pub fn load_credentials() -> Result<Option<CodexCredentials>> {
     }))
 }
 
+/// Prompt-free, non-refreshing readiness check for picker/onboarding surfaces.
+/// It validates stored structure and requires either an unexpired access token
+/// or a nonblank refresh token; no network request is made.
+#[must_use]
+pub fn credentials_present() -> bool {
+    if ["OPENAI_CODEX_ACCESS_TOKEN", "CODEX_ACCESS_TOKEN"]
+        .iter()
+        .any(|name| std::env::var(name).is_ok_and(|token| !token.trim().is_empty()))
+    {
+        return true;
+    }
+
+    stored_credentials_present()
+}
+
+/// Validate only the stored OAuth file, excluding token environment
+/// overrides so config-vs-env provenance remains truthful.
+#[must_use]
+pub fn stored_credentials_present() -> bool {
+    load_credentials()
+        .ok()
+        .flatten()
+        .is_some_and(|credentials| {
+            !token_is_expired(&credentials.access_token)
+                || credentials
+                    .refresh_token
+                    .as_deref()
+                    .is_some_and(|token| !token.trim().is_empty())
+        })
+}
+
 /// Refresh an expired access token using the refresh token.
 ///
 /// Calls the OpenAI token endpoint and returns new credentials.
@@ -362,6 +393,33 @@ mod tests {
         let payload = URL_SAFE_NO_PAD.encode(b"{\"exp\":1000000000}");
         let token = format!("header.{payload}.sig");
         assert!(token_is_expired(&token));
+    }
+
+    #[test]
+    fn credential_presence_rejects_empty_and_malformed_files_without_refresh() {
+        let _lock = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().expect("temp Codex home");
+        let auth_path = home.path().join("auth.json");
+        let _auth = crate::test_support::EnvVarGuard::set("OPENAI_CODEX_AUTH_FILE", &auth_path);
+        let _access = crate::test_support::EnvVarGuard::remove("OPENAI_CODEX_ACCESS_TOKEN");
+        let _legacy_access = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+
+        std::fs::write(&auth_path, "{}").expect("empty auth");
+        assert!(!credentials_present());
+        std::fs::write(&auth_path, "{not-json").expect("malformed auth");
+        assert!(!credentials_present());
+
+        let payload = URL_SAFE_NO_PAD.encode(b"{\"exp\":9999999999}");
+        let access_token = format!("header.{payload}.signature");
+        std::fs::write(
+            &auth_path,
+            serde_json::to_vec(&serde_json::json!({
+                "tokens": {"access_token": access_token}
+            }))
+            .expect("valid auth json"),
+        )
+        .expect("valid auth");
+        assert!(credentials_present());
     }
 
     #[test]

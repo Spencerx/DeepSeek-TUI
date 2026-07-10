@@ -325,13 +325,16 @@ pub(super) fn subagent_message_refreshes_workspace_context(message: &MailboxMess
 /// allocating a `DelegateCard` or `FanoutCard` on first sight (issue #128).
 pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &MailboxMessage) -> bool {
     // Accumulate sub-agent token costs for the real-time footer counter (#166).
-    if let MailboxMessage::TokenUsage { model, usage, .. } = message {
+    if let MailboxMessage::TokenUsage {
+        provider,
+        model,
+        usage,
+        ..
+    } = message
+    {
         if app.session.subagent_cost_event_seqs.insert(seq)
-            && let Some(cost) = crate::pricing::calculate_turn_cost_estimate_for_provider(
-                app.api_provider,
-                model,
-                usage,
-            )
+            && let Some(cost) =
+                crate::pricing::calculate_turn_cost_estimate_for_provider(*provider, model, usage)
         {
             app.accrue_subagent_cost_estimate(cost);
         }
