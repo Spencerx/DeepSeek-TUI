@@ -30,6 +30,9 @@ pub struct CompactionConfig {
     pub enabled: bool,
     pub token_threshold: usize,
     pub model: String,
+    /// Route-effective context window. `None` preserves compatibility for
+    /// callers that have not resolved a provider route yet.
+    pub effective_context_window: Option<u32>,
     pub cache_summary: bool,
 }
 
@@ -54,6 +57,7 @@ impl Default for CompactionConfig {
             // `compaction_threshold_for_model_and_effort`.
             token_threshold: 800_000,
             model: DEFAULT_TEXT_MODEL.to_string(),
+            effective_context_window: None,
             cache_summary: true,
         }
     }
@@ -91,9 +95,13 @@ struct SummaryInputLimits {
     word_limit: usize,
 }
 
-fn summary_input_limits_for_model(model: &str) -> SummaryInputLimits {
-    let is_large_context =
-        context_window_for_model(model).is_some_and(|window| window >= LARGE_CONTEXT_WINDOW_TOKENS);
+fn summary_input_limits_for_model(
+    model: &str,
+    effective_context_window: Option<u32>,
+) -> SummaryInputLimits {
+    let is_large_context = effective_context_window
+        .or_else(|| context_window_for_model(model))
+        .is_some_and(|window| window >= LARGE_CONTEXT_WINDOW_TOKENS);
     if is_large_context {
         SummaryInputLimits {
             text_snippet_chars: LARGE_CONTEXT_SUMMARY_TEXT_SNIPPET_CHARS,
@@ -1127,7 +1135,13 @@ pub async fn compact_messages(
         .collect();
 
     // Create a summary of the unpinned portion of the conversation
-    let summary = create_summary(client, &to_summarize, &config.model).await?;
+    let summary = create_summary(
+        client,
+        &to_summarize,
+        &config.model,
+        config.effective_context_window,
+    )
+    .await?;
 
     // Extract workflow context (files touched, tasks in progress, etc.)
     let workflow_context = extract_workflow_context(&to_summarize, workspace);
@@ -1179,9 +1193,11 @@ async fn create_summary(
     client: &DeepSeekClient,
     messages: &[Message],
     model: &str,
+    effective_context_window: Option<u32>,
 ) -> Result<String> {
-    let limits = summary_input_limits_for_model(model);
-    let used_cache_aligned = should_use_cache_aligned_summary(model, messages);
+    let limits = summary_input_limits_for_model(model, effective_context_window);
+    let used_cache_aligned =
+        should_use_cache_aligned_summary(model, effective_context_window, messages);
     let request = if used_cache_aligned {
         build_cache_aligned_summary_request(model, messages, limits)
     } else {
@@ -1211,7 +1227,7 @@ async fn create_summary(
     // Compaction summary calls are billed by DeepSeek; route the
     // tokens through the side-channel so the dashboard total
     // matches the website (#526).
-    crate::cost_status::report(&response.model, &response.usage);
+    crate::cost_status::report(client.api_provider(), &response.model, &response.usage);
 
     // #584: emit one debug-level event per summary call so the
     // V4 cache-aligned win is observable post-deploy without
@@ -1336,8 +1352,12 @@ fn log_summary_cache_telemetry(used_cache_aligned: bool, usage: &crate::models::
 /// `create_summary` emits a `tracing::debug!` event under
 /// `target = "compaction"` after each call so the path choice and
 /// cache-hit rate are observable post-deploy without UI surface.
-fn should_use_cache_aligned_summary(model: &str, messages: &[Message]) -> bool {
-    let Some(window) = context_window_for_model(model) else {
+fn should_use_cache_aligned_summary(
+    model: &str,
+    effective_context_window: Option<u32>,
+    messages: &[Message],
+) -> bool {
+    let Some(window) = effective_context_window.or_else(|| context_window_for_model(model)) else {
         return false;
     };
     if window < LARGE_CONTEXT_WINDOW_TOKENS {
@@ -1850,12 +1870,27 @@ mod tests {
 
     #[test]
     fn summary_limits_expand_for_v4_context() {
-        let legacy = summary_input_limits_for_model("deepseek-v3.2-128k");
-        let v4 = summary_input_limits_for_model("deepseek-v4-pro");
+        let legacy = summary_input_limits_for_model("deepseek-v3.2-128k", None);
+        let v4 = summary_input_limits_for_model("deepseek-v4-pro", None);
 
         assert!(v4.input_max_chars > legacy.input_max_chars);
         assert!(v4.tool_result_snippet_chars > legacy.tool_result_snippet_chars);
         assert!(v4.max_tokens > legacy.max_tokens);
+    }
+
+    #[test]
+    fn route_effective_window_bounds_same_id_oauth_summary() {
+        let api = summary_input_limits_for_model("gpt-5.5", None);
+        let oauth = summary_input_limits_for_model("gpt-5.5", Some(272_000));
+        let messages = vec![msg("user", "summarize this route")];
+
+        assert!(api.input_max_chars > oauth.input_max_chars);
+        assert!(should_use_cache_aligned_summary("gpt-5.5", None, &messages));
+        assert!(!should_use_cache_aligned_summary(
+            "gpt-5.5",
+            Some(272_000),
+            &messages
+        ));
     }
 
     #[test]
@@ -1864,10 +1899,12 @@ mod tests {
 
         assert!(should_use_cache_aligned_summary(
             "deepseek-v4-flash",
+            None,
             &messages
         ));
         assert!(!should_use_cache_aligned_summary(
             "deepseek-v3.2-128k",
+            None,
             &messages
         ));
     }
@@ -1928,7 +1965,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let limits = summary_input_limits_for_model("deepseek-v4-pro");
+        let limits = summary_input_limits_for_model("deepseek-v4-pro", None);
 
         let request = build_formatted_summary_request("deepseek-v4-pro", &messages, limits);
 
@@ -1946,7 +1983,7 @@ mod tests {
             msg("user", "Please edit crates/tui/src/compaction.rs"),
             msg("assistant", "I will inspect the file."),
         ];
-        let limits = summary_input_limits_for_model("deepseek-v4-pro");
+        let limits = summary_input_limits_for_model("deepseek-v4-pro", None);
         let request = build_cache_aligned_summary_request("deepseek-v4-pro", &messages, limits);
 
         assert_eq!(request.system, None);

@@ -411,7 +411,15 @@ fn accrue_child_token_cost_if_any(app: &mut App, result: &Result<ToolResult, Too
         reasoning_replay_tokens: None,
         server_tool_use: None,
     };
-    if let Some(cost) = crate::pricing::calculate_turn_cost_estimate_from_usage(model, &usage) {
+    let provider = metadata
+        .get("child_provider")
+        .or_else(|| metadata.get("resolved_provider"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::config::ApiProvider::parse)
+        .unwrap_or(app.api_provider);
+    if let Some(cost) =
+        crate::pricing::calculate_turn_cost_estimate_for_provider(provider, model, &usage)
+    {
         app.accrue_subagent_cost_estimate(cost);
     }
 }

@@ -4,7 +4,6 @@ use crate::config::{ApiProvider, provider_capability};
 use crate::context_budget::ContextBudget;
 use crate::models::{
     DEFAULT_AUTO_COMPACT_MAX_CONTEXT_WINDOW_TOKENS, DEFAULT_COMPACTION_TOKEN_THRESHOLD,
-    compaction_threshold_for_model_at_percent,
 };
 
 /// Preserve only route limits that came from a concrete offering.
@@ -63,22 +62,15 @@ pub(crate) fn compaction_threshold_for_route_at_percent(
     route_limits: Option<RouteLimits>,
     percent: f64,
 ) -> usize {
-    if route_limits
-        .and_then(|limits| limits.context_tokens)
-        .is_some()
-    {
-        let window = route_context_window_tokens(provider, model, route_limits);
-        let percent = percent.clamp(10.0, 100.0);
-        let threshold = (f64::from(window) * percent / 100.0).round();
-        let threshold = if threshold.is_finite() && threshold > 0.0 {
-            threshold as u64
-        } else {
-            return DEFAULT_COMPACTION_TOKEN_THRESHOLD;
-        };
-        return usize::try_from(threshold).unwrap_or(DEFAULT_COMPACTION_TOKEN_THRESHOLD);
-    }
-
-    compaction_threshold_for_model_at_percent(model, percent)
+    let window = route_context_window_tokens(provider, model, route_limits);
+    let percent = percent.clamp(10.0, 100.0);
+    let threshold = (f64::from(window) * percent / 100.0).round();
+    let threshold = if threshold.is_finite() && threshold > 0.0 {
+        threshold as u64
+    } else {
+        return DEFAULT_COMPACTION_TOKEN_THRESHOLD;
+    };
+    usize::try_from(threshold).unwrap_or(DEFAULT_COMPACTION_TOKEN_THRESHOLD)
 }
 
 #[must_use]
@@ -87,13 +79,33 @@ pub(crate) fn auto_compact_default_for_route(
     model: &str,
     route_limits: Option<RouteLimits>,
 ) -> bool {
-    if route_limits
-        .and_then(|limits| limits.context_tokens)
-        .is_some()
-    {
-        return route_context_window_tokens(provider, model, route_limits)
-            <= DEFAULT_AUTO_COMPACT_MAX_CONTEXT_WINDOW_TOKENS;
-    }
+    route_context_window_tokens(provider, model, route_limits)
+        <= DEFAULT_AUTO_COMPACT_MAX_CONTEXT_WINDOW_TOKENS
+}
 
-    crate::models::auto_compact_default_for_model(model)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_missing_route_metadata_uses_provider_context_floor() {
+        assert_eq!(
+            route_context_window_tokens(ApiProvider::OpenaiCodex, "gpt-5.5", None),
+            128_000
+        );
+        assert_eq!(
+            compaction_threshold_for_route_at_percent(
+                ApiProvider::OpenaiCodex,
+                "gpt-5.5",
+                None,
+                80.0,
+            ),
+            102_400
+        );
+        assert!(auto_compact_default_for_route(
+            ApiProvider::OpenaiCodex,
+            "gpt-5.5",
+            None,
+        ));
+    }
 }

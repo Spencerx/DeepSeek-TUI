@@ -60,10 +60,12 @@ pub(super) fn effective_max_output_tokens(model: &str) -> u32 {
 }
 
 pub(super) fn effective_max_output_tokens_for_route(
+    provider: ApiProvider,
     model: &str,
     route_limits: Option<RouteLimits>,
 ) -> u32 {
-    let cap = effective_max_output_tokens(model);
+    let cap = effective_max_output_tokens(model)
+        .min(crate::config::provider_capability(provider, model).max_output);
     let cap = crate::route_budget::route_output_limit_tokens(route_limits)
         .map_or(cap, |route_cap| cap.min(route_cap));
     let Some(window) = route_limits
@@ -450,9 +452,8 @@ fn compact_structured_tool_result_for_context(tool_name: &str, raw: &str) -> Opt
     }
 }
 
-fn tool_result_context_limits_for_model(model: &str) -> ToolResultContextLimits {
-    let is_large_context =
-        context_window_for_model(model).is_some_and(|window| window >= LARGE_CONTEXT_WINDOW_TOKENS);
+fn tool_result_context_limits_for_window(context_window: u32) -> ToolResultContextLimits {
+    let is_large_context = context_window >= LARGE_CONTEXT_WINDOW_TOKENS;
 
     if is_large_context {
         ToolResultContextLimits {
@@ -469,8 +470,19 @@ fn tool_result_context_limits_for_model(model: &str) -> ToolResultContextLimits 
     }
 }
 
+#[cfg(test)]
 pub(crate) fn compact_tool_result_for_context(
     model: &str,
+    tool_name: &str,
+    output: &ToolResult,
+) -> String {
+    compact_tool_result_for_route(ApiProvider::Deepseek, model, None, tool_name, output)
+}
+
+pub(crate) fn compact_tool_result_for_route(
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<RouteLimits>,
     tool_name: &str,
     output: &ToolResult,
 ) -> String {
@@ -487,7 +499,9 @@ pub(crate) fn compact_tool_result_for_context(
         return summary;
     }
 
-    let limits = tool_result_context_limits_for_model(model);
+    let context_window =
+        crate::route_budget::route_context_window_tokens(provider, model, route_limits);
+    let limits = tool_result_context_limits_for_window(context_window);
     let raw_chars = raw.chars().count();
     let should_compact = raw_chars > limits.hard_limit_chars
         || (tool_result_is_noisy(tool_name) && raw_chars > limits.noisy_soft_limit_chars);
@@ -629,7 +643,7 @@ pub(super) fn route_context_budget_for_route(
     input_tokens: usize,
 ) -> Option<ContextBudget> {
     let window = crate::route_budget::route_context_window_tokens(provider, model, route_limits);
-    let output_cap = route_output_reservation_for_window(model, window, route_limits);
+    let output_cap = route_output_reservation_for_window(provider, model, window, route_limits);
     crate::route_budget::route_context_budget(
         provider,
         model,
@@ -640,6 +654,7 @@ pub(super) fn route_context_budget_for_route(
 }
 
 fn route_output_reservation_for_window(
+    provider: ApiProvider,
     model: &str,
     window_tokens: u32,
     route_limits: Option<RouteLimits>,
@@ -650,7 +665,7 @@ fn route_output_reservation_for_window(
     if window_tokens >= INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD {
         TURN_MAX_OUTPUT_TOKENS
     } else {
-        effective_max_output_tokens(model)
+        effective_max_output_tokens_for_route(provider, model, route_limits)
     }
 }
 

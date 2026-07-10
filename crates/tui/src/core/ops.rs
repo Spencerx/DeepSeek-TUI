@@ -87,6 +87,11 @@ pub enum Op {
         /// different authenticated provider.
         provider: Option<ApiProvider>,
         model: String,
+        /// Provider-route limits resolved by the host for this exact turn.
+        route_limits: Option<codewhale_config::route::RouteLimits>,
+        /// Compaction policy derived from the same provider route. Carrying it
+        /// atomically avoids a model/limit mismatch before `SendMessage`.
+        compaction: Box<CompactionConfig>,
         goal_objective: Option<String>,
         goal_token_budget: Option<u32>,
         goal_status: GoalStatus,

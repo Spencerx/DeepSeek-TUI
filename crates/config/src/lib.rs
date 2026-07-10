@@ -50,13 +50,23 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 pub const PERMISSIONS_FILE_NAME: &str = "permissions.toml";
 
+fn http_headers_are_effectively_empty(headers: &BTreeMap<String, String>) -> bool {
+    !headers
+        .iter()
+        .any(|(name, value)| !name.trim().is_empty() && !value.trim().is_empty())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderConfigToml {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(
         default,
+        skip_serializing_if = "Option::is_none",
         alias = "contextWindow",
         alias = "context_window_tokens",
         alias = "contextWindowTokens",
@@ -64,66 +74,101 @@ pub struct ProviderConfigToml {
         alias = "contextLength"
     )]
     pub context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insecure_skip_tls_verify: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "http_headers_are_effectively_empty")]
     pub http_headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_suffix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProviderAuthSourceToml>,
 }
 
+impl ProviderConfigToml {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        let blank = |value: Option<&String>| value.is_none_or(|value| value.trim().is_empty());
+
+        blank(self.api_key.as_ref())
+            && blank(self.base_url.as_ref())
+            && blank(self.model.as_ref())
+            && self.context_window.is_none()
+            && blank(self.mode.as_ref())
+            && blank(self.auth_mode.as_ref())
+            && self.insecure_skip_tls_verify.is_none()
+            && http_headers_are_effectively_empty(&self.http_headers)
+            && blank(self.path_suffix.as_ref())
+            && self.auth.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProvidersToml {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub deepseek: ProviderConfigToml,
     #[serde(
         default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
         alias = "deepseek-anthropic",
         alias = "deepseekAnthropic",
         alias = "deepseek-claude",
         alias = "deepseek_claude"
     )]
     pub deepseek_anthropic: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub nvidia_nim: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub openai: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub atlascloud: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub wanjie_ark: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub volcengine: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub openrouter: ProviderConfigToml,
-    #[serde(default, alias = "xiaomi", alias = "mimo", alias = "xiaomimimo")]
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "xiaomi",
+        alias = "mimo",
+        alias = "xiaomimimo"
+    )]
     pub xiaomi_mimo: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub novita: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub fireworks: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub siliconflow: ProviderConfigToml,
-    #[serde(default, alias = "siliconflow-CN", alias = "siliconflow-cn")]
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "siliconflow-CN",
+        alias = "siliconflow-cn"
+    )]
     pub siliconflow_cn: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub arcee: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub moonshot: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub sglang: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub vllm: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub ollama: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub huggingface: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub together: ProviderConfigToml,
     #[serde(
         default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
         alias = "baidu-qianfan",
         alias = "baidu_qianfan",
         alias = "baidu"
@@ -131,6 +176,7 @@ pub struct ProvidersToml {
     pub qianfan: ProviderConfigToml,
     #[serde(
         default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
         alias = "openai-codex",
         alias = "openai_codex",
         alias = "codex",
@@ -138,12 +184,18 @@ pub struct ProvidersToml {
         alias = "chatgpt-codex"
     )]
     pub openai_codex: ProviderConfigToml,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub anthropic: ProviderConfigToml,
-    #[serde(default, alias = "open-model", alias = "open_model")]
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "open-model",
+        alias = "open_model"
+    )]
     pub openmodel: ProviderConfigToml,
     #[serde(
         default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
         alias = "z-ai",
         alias = "z_ai",
         alias = "z.ai",
@@ -155,6 +207,7 @@ pub struct ProvidersToml {
     pub zai: ProviderConfigToml,
     #[serde(
         default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
         alias = "step-fun",
         alias = "step_fun",
         alias = "stepfun",
@@ -163,14 +216,32 @@ pub struct ProvidersToml {
         alias = "step_flash"
     )]
     pub stepfun: ProviderConfigToml,
-    #[serde(default, alias = "mini-max", alias = "mini_max", alias = "minimax")]
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "mini-max",
+        alias = "mini_max",
+        alias = "minimax"
+    )]
     pub minimax: ProviderConfigToml,
-    #[serde(default, alias = "deep-infra", alias = "deep_infra")]
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "deep-infra",
+        alias = "deep_infra"
+    )]
     pub deepinfra: ProviderConfigToml,
-    #[serde(default, alias = "sakana-ai", alias = "sakana_ai", alias = "fugu")]
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "sakana-ai",
+        alias = "sakana_ai",
+        alias = "fugu"
+    )]
     pub sakana: ProviderConfigToml,
     #[serde(
         default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
         alias = "long-cat",
         alias = "meituan-longcat",
         alias = "meituan"
@@ -178,6 +249,7 @@ pub struct ProvidersToml {
     pub longcat: ProviderConfigToml,
     #[serde(
         default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
         alias = "meta-ai",
         alias = "meta_ai",
         alias = "meta-model-api",
@@ -186,14 +258,20 @@ pub struct ProvidersToml {
         alias = "muse-spark"
     )]
     pub meta: ProviderConfigToml,
-    #[serde(default, alias = "x-ai", alias = "x_ai", alias = "grok")]
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "x-ai",
+        alias = "x_ai",
+        alias = "grok"
+    )]
     pub xai: ProviderConfigToml,
     /// Catch-all table for the dynamic OpenAI-compatible custom provider
     /// identity (#1519). Arbitrary `[providers.<name>]` tables are handled by
     /// the tui-side flatten map; this named slot keeps the canonical
     /// `ProviderKind::Custom` lookups total without leaking into another
     /// provider's config.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub custom: ProviderConfigToml,
 }
 
@@ -254,6 +332,13 @@ impl PermissionsToml {
 }
 
 impl ProvidersToml {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        ProviderKind::all()
+            .iter()
+            .all(|provider| self.for_provider(*provider).is_empty())
+    }
+
     #[must_use]
     pub fn for_provider(&self, provider: ProviderKind) -> &ProviderConfigToml {
         match provider {
@@ -340,7 +425,7 @@ pub struct ConfigToml {
     /// TUI-compatible DeepSeek base URL.
     pub base_url: Option<String>,
     /// Optional extra HTTP headers forwarded to model API requests.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "http_headers_are_effectively_empty")]
     pub http_headers: BTreeMap<String, String>,
     /// TUI-compatible default DeepSeek model.
     pub default_text_model: Option<String>,
@@ -357,7 +442,7 @@ pub struct ConfigToml {
     /// Native tool catalog controls shared with `codewhale-tui`.
     #[serde(default)]
     pub tools: Option<ToolsToml>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProvidersToml::is_empty")]
     pub providers: ProvidersToml,
     /// Provider fallback chain (#2574). TUI runtime code may advance through
     /// these providers after recoverable provider errors; config resolution

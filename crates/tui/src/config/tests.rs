@@ -6966,10 +6966,25 @@ fn provider_capability_openai_codex_uses_responses_payload() {
         cap.context_window,
         OPENAI_CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 128_000);
+    assert_eq!(cap.max_output, 4096);
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(cap.request_payload_mode, RequestPayloadMode::Responses);
+}
+
+#[test]
+fn invalid_provider_auth_source_is_not_explicit_configuration() {
+    let entry = ProviderConfig {
+        auth: Some(codewhale_config::ProviderAuthSourceToml {
+            source: codewhale_config::AuthSourceKind::Command,
+            command: Vec::new(),
+            timeout_ms: None,
+            secret_id: None,
+        }),
+        ..ProviderConfig::default()
+    };
+
+    assert!(!provider_config_is_explicit(&entry));
 }
 
 #[test]

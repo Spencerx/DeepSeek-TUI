@@ -5516,6 +5516,46 @@ fn empty_fallback_providers_do_not_serialize() {
 }
 
 #[test]
+fn empty_provider_header_tables_do_not_survive_round_trip() {
+    let polluted = r#"
+[http_headers]
+
+[providers.anthropic.http_headers]
+" " = "ignored"
+"X-Blank" = "   "
+
+[providers.openrouter.http_headers]
+
+[providers.xai]
+model = "   "
+"#;
+    let config: ConfigToml = toml::from_str(polluted).expect("polluted config parses");
+    let serialized = toml::to_string_pretty(&config).expect("config serializes");
+
+    assert!(
+        !serialized.contains("[http_headers]"),
+        "empty root headers must not be serialized:\n{serialized}"
+    );
+    assert!(
+        !serialized.contains("[providers.anthropic"),
+        "empty Anthropic provider state must not be serialized:\n{serialized}"
+    );
+    assert!(
+        !serialized.contains("[providers.openrouter"),
+        "empty OpenRouter provider state must not be serialized:\n{serialized}"
+    );
+    assert!(
+        !serialized.contains("[providers.xai"),
+        "blank provider fields must not be serialized:\n{serialized}"
+    );
+
+    let round_tripped: ConfigToml = toml::from_str(&serialized).expect("canonical config parses");
+    assert!(round_tripped.http_headers.is_empty());
+    assert!(round_tripped.providers.anthropic.http_headers.is_empty());
+    assert!(round_tripped.providers.openrouter.http_headers.is_empty());
+}
+
+#[test]
 fn workflow_config_defaults_match_product_surface() {
     // #4128 / Section 2.11: omitted `[workflow]` keys resolve to the
     // documented product defaults so launch/approval/persist share one model.
