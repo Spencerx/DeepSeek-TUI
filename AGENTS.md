@@ -47,6 +47,13 @@
   injection were all removed. `constitution.md` is the sole base prompt.
 - Configurable sub-agent depth stays. Add a new limit only when it's clearly
   needed, and explain why.
+- **Do-not-delete guardrail** (salvaged from the 0.8.68 handoff; these were
+  repeatedly misflagged as dead code and deleting them broke the build):
+  `tui/src/memory.rs`, `tui/src/context_budget.rs`,
+  `tui/src/model_registry.rs`, `tui/src/prompt_zones.rs`,
+  `tui/src/tools/remember.rs`, and the entire `config/src/route/` directory
+  are all actively imported. Verify consumers with `rg` before believing any
+  dead-code audit.
 - The sub-agent **TUI freeze reported in older handoffs is resolved** by the
   v0.8.61 cutover (cap-20, persist-debounce, AgentProgress redraw throttle,
   ListSubAgents coalescing, input-pump-off-render-thread). The leading

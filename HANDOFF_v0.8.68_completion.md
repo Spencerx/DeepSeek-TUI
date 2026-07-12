@@ -1,9 +1,17 @@
 # CodeWhale 0.8.68 Handoff — Finish the Landing
 
-> **Companion document:** [`opportunities.md`](../../opportunities.md) — the
-> verified cleanup & optimization catalog. Every item below cross-references
-> it. Read both together; this file is the *what to do next*, opportunities.md
-> is the *what's real*.
+> **Status (2026-07-12): Historical / completed.** Every actionable item below
+> either landed by v0.8.68 (multipart/brotli removal, palette migration,
+> allowed_tools deletion, tools_file/removed_messages cleanup, double-Enter
+> steer) or was deliberately superseded — item 7's "remove `todo_*` aliases at
+> 0.9.0" went the other way: #4132 keeps `todo_*`/`checklist_*` as hidden
+> replay aliases, so do not execute it. The DO-NOT-DELETE module table below
+> remains a standing guardrail. The companion `opportunities.md` was never
+> committed; its link is dangling by design.
+>
+> ~~**Companion document:** [`opportunities.md`](../../opportunities.md)~~ (not
+> in the repository) — this file was the *what to do next*; the catalog behind
+> it stayed private.
 
 ## Branch & Location
 - **Worktree:** `/Users/hunter/Desktop/Harnesses/CW/.cw-worktrees/v0867-pr4047`

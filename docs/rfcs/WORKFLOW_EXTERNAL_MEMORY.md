@@ -1,6 +1,11 @@
 # Workflow External Memory Cutline
 
-This note resolves the v0.9.0 cutline for Aleph-style external memory in
+**Status (2026-07-12): Principle-only cutline — current.** The boundary below
+still holds at v0.8.68. Note the layer table names machinery (TraceStore, the
+ARMH/RLM memo store, the cached-main overlay) that is proposed, not in the
+tree; only user memory (`/memory`, `remember`) and RLM sessions exist today.
+
+This note resolves the next-major cutline for Aleph-style external memory in
 Workflow. It is a design boundary, not a runtime implementation.
 
 ## Decision

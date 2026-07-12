@@ -205,8 +205,9 @@ doctor`, `codewhale sessions`, and your expected skills all show the same state.
 ## Why the name change
 
 CodeWhale is a shorter, terminal-friendlier handle for the same terminal
-coding agent and the longer-term product direction: a DeepSeek-first agentic
-terminal for open source and open-weight coding models. The project name,
+coding agent and the longer-term product direction: an agentic terminal for
+open source and open-weight coding models, with DeepSeek — the provider the
+project started with — remaining first-class alongside every other provider. The project name,
 command names, package names, release assets, Docker image, and CNB mirror move
 to CodeWhale; the official DeepSeek provider, model IDs, env vars, and
 `~/.deepseek/` config surface remain first-class.

@@ -1,5 +1,13 @@
 # CodeWhale 0.8.68 — Workflow + Stability Patch Release
 
+> **Status (2026-07-12): Historical.** v0.8.68 shipped on 2026-07-10; this
+> tracker is superseded by the shipped release. Caution for readers: the
+> Wave-7 "Multitask" rows below are marked Done but describe work that was
+> **rolled back before ship** — Multitask never shipped and leftover settings
+> normalize to Operate (`crates/tui/src/tui/app.rs`, mode picker). The
+> "deferred to 0.9.0" lists remain useful as a raw next-major backlog feed;
+> the release label itself is a maintainer decision.
+>
 > **What this is.** Local tracker + handoff for the CodeWhale 0.8.68 release
 > candidate. It documents what's in scope, what's deferred to 0.9.0, and the
 > current verification state.
