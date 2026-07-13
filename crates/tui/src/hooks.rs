@@ -617,6 +617,7 @@ pub struct TurnEndPayloadInput<'a> {
     pub created_at: DateTime<Utc>,
     pub model_backed: bool,
     pub provider: Option<&'a str>,
+    pub billing_surface: Option<&'a str>,
     pub model: Option<&'a str>,
     pub turn_id: &'a str,
     pub status: &'a str,
@@ -1299,6 +1300,7 @@ pub fn turn_end_payload(input: TurnEndPayloadInput<'_>) -> serde_json::Value {
         "created_at": input.created_at.to_rfc3339(),
         "model_backed": input.model_backed,
         "provider": input.provider,
+        "billing_surface": input.billing_surface,
         "model": input.model.or(input.context.model.as_deref()),
         "turn_id": input.turn_id,
         "status": input.status,
@@ -1587,6 +1589,7 @@ NOEQUAL line dropped
             created_at: "2026-07-12T10:30:00Z".parse().expect("timestamp"),
             model_backed: true,
             provider: Some("deepseek"),
+            billing_surface: Some("test-payg"),
             model: Some("deepseek-v4-pro"),
             turn_id: "turn_123",
             status: "completed",
@@ -1610,6 +1613,8 @@ NOEQUAL line dropped
         assert_eq!(payload["created_at"], "2026-07-12T10:30:00+00:00");
         assert_eq!(payload["model_backed"], true);
         assert_eq!(payload["provider"], "deepseek");
+        assert_eq!(payload["billing_surface"], "test-payg");
+        assert!(payload.get("base_url").is_none());
         assert_eq!(payload["model"], "deepseek-v4-pro");
         assert_eq!(payload["turn_id"], "turn_123");
         assert_eq!(payload["status"], "completed");
@@ -1901,6 +1906,7 @@ printf '%s\n' '{{"text":"stdout is not a mutation contract"}}'
             created_at: "2026-07-12T10:30:00Z".parse().expect("timestamp"),
             model_backed: true,
             provider: Some("openai"),
+            billing_surface: None,
             model: Some("gpt-5.5"),
             turn_id: "turn_observed",
             status: "completed",

@@ -1229,6 +1229,7 @@ fn execute_turn_end_observer_hook(
     app: &App,
     turn: &ActiveTurnMetadata,
     usage: &Usage,
+    billing_surface: Option<&str>,
     duration: Duration,
     error: Option<&str>,
 ) {
@@ -1242,6 +1243,7 @@ fn execute_turn_end_observer_hook(
         created_at: turn.created_at,
         model_backed: turn.route.is_some(),
         provider: turn.route.as_ref().map(|route| route.provider.as_str()),
+        billing_surface,
         model: turn.route.as_ref().map(|route| route.model.as_str()),
         turn_id: &turn.turn_id,
         status: app.runtime_turn_status.as_deref().unwrap_or("unknown"),
@@ -2559,6 +2561,15 @@ async fn run_event_loop(
                         base_url,
                     } => {
                         let completed_turn = app.active_turn.take();
+                        let billing_surface = completed_turn
+                            .as_ref()
+                            .and_then(|turn| turn.route.as_ref())
+                            .and_then(|route| {
+                                crate::pricing::billing_surface_for_route(
+                                    route.provider,
+                                    base_url.as_deref(),
+                                )
+                            });
                         app.session.last_tool_catalog = tool_catalog;
                         app.session.last_base_url = base_url;
                         let was_locally_cancelled = app.suppress_stream_events_until_turn_complete;
@@ -2744,9 +2755,10 @@ async fn run_event_loop(
                                 turn.route.as_ref().map(|route| (turn.created_at, route))
                             })
                             .and_then(|(created_at, route)| {
-                                crate::pricing::calculate_turn_cost_estimate_for_provider_at(
+                                crate::pricing::calculate_turn_cost_estimate_for_route_at(
                                     route.provider,
                                     &route.model,
+                                    billing_surface,
                                     &usage,
                                     created_at,
                                 )
@@ -2945,6 +2957,7 @@ async fn run_event_loop(
                                 app,
                                 completed_turn,
                                 &usage,
+                                billing_surface,
                                 turn_elapsed,
                                 error.as_deref(),
                             );

@@ -21,6 +21,7 @@ use crate::config::{
 };
 use crate::models::Usage;
 use crate::pricing::{
+    calculate_turn_cost_estimate_for_billing_surface,
     calculate_turn_cost_estimate_for_provider, calculate_turn_cost_estimate_for_provider_at,
     token_usage_for_pricing,
 };
@@ -38,6 +39,10 @@ pub struct TurnScore {
     /// otherwise unknown provenance, so cost must remain unpriced.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Non-secret discriminator when one provider/model pair spans multiple
+    /// billing systems. Missing provenance keeps ambiguous routes unpriced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_surface: Option<String>,
     pub model: String,
     /// Non-cached (billable) input tokens.
     pub input_tokens: u64,
@@ -107,6 +112,7 @@ pub struct Scorecard {
 
 /// One row of input to the scorecard: a turn id, the model that served it, and
 /// the turn's recorded usage.
+#[cfg(test)]
 pub struct TurnInput<'a> {
     pub turn_id: String,
     pub created_at: Option<&'a DateTime<Utc>>,
@@ -115,10 +121,21 @@ pub struct TurnInput<'a> {
     pub usage: &'a Usage,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ScorecardTurnRef<'a> {
+    turn_id: &'a str,
+    created_at: Option<&'a DateTime<Utc>>,
+    provider: Option<&'a str>,
+    billing_surface: Option<&'a str>,
+    model: &'a str,
+    usage: &'a Usage,
+}
+
 /// A recorded turn as read from a scorecard input file (a JSON array of these).
 /// The base shape matches the per-turn data a `TurnEnd` hook emits. Recorders
-/// and persisted runtime exports can add `provider` / `effective_provider`;
-/// legacy model-only recordings remain readable but deliberately unpriced.
+/// and persisted runtime exports can add `provider` / `effective_provider` plus
+/// non-secret billing-surface provenance. Legacy model-only recordings remain
+/// readable but deliberately unpriced.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecordedTurn {
     #[serde(default, alias = "id")]
@@ -132,6 +149,8 @@ pub struct RecordedTurn {
     pub model_backed: Option<bool>,
     #[serde(default, alias = "effective_provider")]
     pub provider: Option<String>,
+    #[serde(default, alias = "effective_billing_surface")]
+    pub billing_surface: Option<String>,
     #[serde(alias = "effective_model")]
     pub model: String,
     pub usage: Usage,
@@ -156,6 +175,7 @@ fn provider_scoped_cost(
     usage: &Usage,
     token_usage: &TokenUsage,
     created_at: Option<&DateTime<Utc>>,
+    billing_surface: Option<&str>,
 ) -> AvailableCost {
     let direct_deepseek = matches!(
         provider,
@@ -191,6 +211,24 @@ fn provider_scoped_cost(
     } else {
         canonical_model
     };
+
+    // StepFun's standard API and Step Plan share provider/model ids but use
+    // unrelated billing systems. Gate every StepFun route on the recorded,
+    // endpoint-derived surface before catalog lookup so a future catalog row
+    // cannot make subscription usage look like PAYG token spend.
+    if provider == ApiProvider::Stepfun {
+        return calculate_turn_cost_estimate_for_billing_surface(
+            provider,
+            &catalog_model,
+            billing_surface,
+            usage,
+        )
+        .map_or_else(AvailableCost::default, |cost| AvailableCost {
+            usd: Some(cost.usd),
+            cny: None,
+        });
+    }
+
     let Some(offering) = catalog_offering_for_model(provider, &catalog_model) else {
         return AvailableCost::default();
     };
@@ -284,8 +322,40 @@ impl Scorecard {
     /// Build a scorecard from recorded per-turn usage. Pure + offline; cost is
     /// computed via the shared pricing layer (`None` pricing → unpriced, 0 cost).
     #[must_use]
+    #[cfg(test)]
     pub fn from_turns(turns: &[TurnInput<'_>]) -> Self {
-        let mut per_turn = Vec::with_capacity(turns.len());
+        Self::from_turn_refs(turns.iter().map(|turn| ScorecardTurnRef {
+            turn_id: &turn.turn_id,
+            created_at: turn.created_at,
+            provider: turn.provider,
+            billing_surface: None,
+            model: &turn.model,
+            usage: turn.usage,
+        }))
+    }
+
+    /// Build directly from hook/runtime records, retaining billing provenance
+    /// while excluding explicitly non-model lifecycle rows.
+    #[must_use]
+    pub fn from_recorded_turns(turns: &[RecordedTurn]) -> Self {
+        Self::from_turn_refs(
+            turns
+                .iter()
+                .filter(|turn| turn.contributes_to_scorecard())
+                .map(|turn| ScorecardTurnRef {
+                    turn_id: &turn.turn_id,
+                    created_at: turn.created_at.as_ref(),
+                    provider: turn.provider.as_deref(),
+                    billing_surface: turn.billing_surface.as_deref(),
+                    model: &turn.model,
+                    usage: &turn.usage,
+                }),
+        )
+    }
+
+    fn from_turn_refs<'a>(turns: impl IntoIterator<Item = ScorecardTurnRef<'a>>) -> Self {
+        let turns = turns.into_iter();
+        let mut per_turn = Vec::with_capacity(turns.size_hint().0);
         let mut metrics = ScorecardMetrics::default();
 
         for turn in turns {
@@ -304,6 +374,7 @@ impl Scorecard {
                         turn.usage,
                         &classes,
                         turn.created_at,
+                        turn.billing_surface,
                     )
                 },
             );
@@ -322,10 +393,11 @@ impl Scorecard {
             metrics.total_cost_cny += cost_cny;
 
             per_turn.push(TurnScore {
-                turn_id: turn.turn_id.clone(),
+                turn_id: turn.turn_id.to_string(),
                 created_at: turn.created_at.cloned(),
                 provider: provider.map(str::to_string),
-                model: turn.model.clone(),
+                billing_surface: turn.billing_surface.map(str::to_string),
+                model: turn.model.to_string(),
                 input_tokens: classes.input,
                 output_tokens: classes.output,
                 cache_read_tokens: classes.cache_read,
@@ -952,6 +1024,69 @@ mod tests {
     }
 
     #[test]
+    fn stepfun_legacy_route_keeps_pricing_without_a_catalog_row() {
+        let u = usage(1000, 500, 250);
+        let recorded = |turn_id: &str,
+                        provider: &str,
+                        model: &str,
+                        billing_surface: Option<&str>| RecordedTurn {
+            turn_id: turn_id.to_string(),
+            created_at: None,
+            model_backed: Some(true),
+            provider: Some(provider.to_string()),
+            billing_surface: billing_surface.map(str::to_string),
+            model: model.to_string(),
+            usage: u.clone(),
+        };
+        let turns = [
+            recorded(
+                "stepfun-default",
+                "stepfun",
+                " STEP-3.7-FLASH ",
+                Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE),
+            ),
+            recorded(
+                "stepfun-plan",
+                "stepfun",
+                "step-3.7-flash",
+                Some(crate::pricing::STEPFUN_PLAN_BILLING_SURFACE),
+            ),
+            recorded("stepfun-missing-surface", "stepfun", "step-3.7-flash", None),
+            recorded("stepfun-unknown-model", "stepfun", "step-3.5-flash", None),
+            recorded(
+                "openrouter-stepfun-name",
+                "openrouter",
+                "step-3.7-flash",
+                None,
+            ),
+            recorded("local-stepfun-name", "ollama", "step-3.7-flash", None),
+            recorded(
+                "sakana-incomplete-tier-price",
+                "sakana",
+                "fugu-ultra-20260615",
+                None,
+            ),
+            recorded(
+                "foreign-deepseek-name",
+                "openmodel",
+                "deepseek-v4-flash",
+                None,
+            ),
+        ];
+
+        let card = Scorecard::from_recorded_turns(&turns);
+
+        assert!((card.per_turn[0].cost_usd - 0.000_735).abs() < 1e-12);
+        assert!(!card.per_turn[0].cost_unpriced);
+        assert!(card.per_turn[0].cost_cny_unpriced);
+        assert_eq!(
+            card.per_turn[0].billing_surface.as_deref(),
+            Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE)
+        );
+        assert!(card.per_turn[1..].iter().all(|turn| turn.cost_unpriced));
+    }
+
+    #[test]
     fn legacy_model_only_record_is_readable_but_unpriced() {
         let recorded: RecordedTurn = serde_json::from_value(serde_json::json!({
             "turn_id": "legacy",
@@ -963,15 +1098,9 @@ mod tests {
         }))
         .expect("parse legacy scorecard turn");
         assert_eq!(recorded.provider, None);
+        assert_eq!(recorded.billing_surface, None);
 
-        let turns = [TurnInput {
-            turn_id: recorded.turn_id.clone(),
-            created_at: recorded.created_at.as_ref(),
-            provider: recorded.provider.as_deref(),
-            model: recorded.model.clone(),
-            usage: &recorded.usage,
-        }];
-        let card = Scorecard::from_turns(&turns);
+        let card = Scorecard::from_recorded_turns(&[recorded]);
 
         assert!(card.per_turn[0].cost_unpriced);
         assert_eq!(card.per_turn[0].cost_usd, 0.0);
@@ -989,6 +1118,7 @@ mod tests {
             "input_summary": "score this turn",
             "created_at": "2026-07-12T10:30:00Z",
             "effective_provider": "openai-codex",
+            "effective_billing_surface": "account-subscription",
             "effective_model": "gpt-5.5",
             "usage": {
                 "input_tokens": 1,
@@ -1003,6 +1133,10 @@ mod tests {
             Some("2026-07-12T10:30:00+00:00".to_string())
         );
         assert_eq!(recorded.provider.as_deref(), Some("openai-codex"));
+        assert_eq!(
+            recorded.billing_surface.as_deref(),
+            Some("account-subscription")
+        );
         assert_eq!(recorded.model, "gpt-5.5");
         assert!(recorded.contributes_to_scorecard());
     }

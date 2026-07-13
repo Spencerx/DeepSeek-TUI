@@ -238,6 +238,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         duration_ms: Some(0),
         usage: None,
         effective_provider: None,
+        effective_billing_surface: None,
         effective_model: None,
         error: None,
         item_ids: vec![

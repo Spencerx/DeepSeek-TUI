@@ -10,10 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Make offline `scorecard` pricing provider-aware: `turn_end` records carry the
-  effective route, runtime exports and supported aliases ingest cleanly,
-  legacy/unknown routes remain explicitly unpriced, and route-scoped cache and
-  recorded-time pricing replace model-only guesses (#4335). This builds on the
-  scorecard introduced by @findshan in #3388.
+  effective route and a non-secret billing surface, runtime exports and
+  supported aliases ingest cleanly, legacy/unknown routes remain explicitly
+  unpriced, and route-scoped cache and recorded-time pricing replace model-only
+  guesses. StepFun PAYG and Step Plan usage now stay distinct without persisting
+  raw endpoint URLs, so subscription quota is never reported as token spend
+  (#4335). This builds on the scorecard introduced by @findshan in #3388.
 
 ## [0.8.68] - 2026-07-13
 

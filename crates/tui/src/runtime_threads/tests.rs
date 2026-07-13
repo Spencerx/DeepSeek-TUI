@@ -79,6 +79,7 @@ fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> Tur
         duration_ms: None,
         usage: None,
         effective_provider: None,
+        effective_billing_surface: None,
         effective_model: None,
         error: None,
         item_ids: Vec::new(),
@@ -113,11 +114,29 @@ fn legacy_turn_record_has_no_invented_route_provenance() {
     let mut value = serde_json::to_value(turn).expect("serialize turn");
     let object = value.as_object_mut().expect("turn object");
     object.remove("effective_provider");
+    object.remove("effective_billing_surface");
     object.remove("effective_model");
 
     let restored: TurnRecord = serde_json::from_value(value).expect("deserialize legacy turn");
     assert_eq!(restored.effective_provider, None);
+    assert_eq!(restored.effective_billing_surface, None);
     assert_eq!(restored.effective_model, None);
+}
+
+#[test]
+fn turn_record_persists_billing_surface_without_raw_endpoint() {
+    let mut turn = sample_turn("thr_surface", "turn_surface", RuntimeTurnStatus::Completed);
+    turn.effective_provider = Some(ApiProvider::Stepfun.as_str().to_string());
+    turn.effective_billing_surface = Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE.to_string());
+    turn.effective_model = Some("step-3.7-flash".to_string());
+
+    let value = serde_json::to_value(turn).expect("serialize turn");
+    assert_eq!(
+        value["effective_billing_surface"],
+        crate::pricing::STEPFUN_PAYG_BILLING_SURFACE
+    );
+    assert!(value.get("base_url").is_none());
+    assert!(value.get("effective_base_url").is_none());
 }
 
 #[tokio::test]
@@ -165,6 +184,45 @@ async fn aggregate_usage_keeps_codex_tokens_without_api_dollar_pricing() -> Resu
     assert_eq!(codex_bucket.cost_usd, 0.0);
     assert_eq!(codex_bucket.input_tokens, 10_000);
     assert_eq!(report.totals.cost_usd, deepseek_bucket.cost_usd);
+    Ok(())
+}
+
+#[tokio::test]
+async fn aggregate_usage_prices_only_stepfun_payg_surface() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let mut thread = sample_thread("thr_stepfun_surfaces");
+    thread.model = "step-3.7-flash".to_string();
+    manager.store.save_thread(&thread)?;
+
+    let usage = Usage {
+        input_tokens: 1_000_000,
+        output_tokens: 500_000,
+        prompt_cache_hit_tokens: Some(250_000),
+        ..Usage::default()
+    };
+    for (turn_id, surface) in [
+        (
+            "turn_stepfun_payg",
+            crate::pricing::STEPFUN_PAYG_BILLING_SURFACE,
+        ),
+        (
+            "turn_stepfun_plan",
+            crate::pricing::STEPFUN_PLAN_BILLING_SURFACE,
+        ),
+    ] {
+        let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+        turn.usage = Some(usage.clone());
+        turn.effective_provider = Some(ApiProvider::Stepfun.as_str().to_string());
+        turn.effective_billing_surface = Some(surface.to_string());
+        turn.effective_model = Some("step-3.7-flash".to_string());
+        manager.store.save_turn(&turn)?;
+    }
+
+    let report = manager
+        .aggregate_usage(None, None, UsageGroupBy::Provider)
+        .await?;
+    assert_eq!(report.totals.turns, 2);
+    assert!((report.totals.cost_usd - 0.735).abs() < 1e-12);
     Ok(())
 }
 
@@ -2653,6 +2711,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         duration_ms: None,
         usage: None,
         effective_provider: None,
+        effective_billing_surface: None,
         effective_model: None,
         error: None,
         item_ids: vec![completed_item.id.clone(), in_progress_item.id.clone()],
@@ -2670,6 +2729,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         duration_ms: None,
         usage: None,
         effective_provider: None,
+        effective_billing_surface: None,
         effective_model: None,
         error: None,
         item_ids: vec![queued_item.id.clone()],
@@ -2917,6 +2977,7 @@ fn seed_turns_with_user_messages(
             duration_ms: Some(0),
             usage: None,
             effective_provider: None,
+            effective_billing_surface: None,
             effective_model: None,
             error: None,
             item_ids: vec![user_item_id, asst_item_id],
