@@ -79,6 +79,7 @@ mod project_context_cache;
 mod prompt_zones;
 mod prompts;
 mod provider_lake;
+mod provider_readiness;
 mod purge;
 mod regex_cache;
 mod remote_setup;
@@ -171,8 +172,8 @@ struct Cli {
     #[arg(short, long, value_name = "PROMPT", num_args = 1..)]
     prompt: Vec<String>,
 
-    /// YOLO mode: enable agent tools + shell execution
-    #[arg(long)]
+    /// Legacy compatibility alias for Act + Full Access.
+    #[arg(long, hide = true)]
     yolo: bool,
 
     /// Maximum number of concurrent sub-agents (1-20)

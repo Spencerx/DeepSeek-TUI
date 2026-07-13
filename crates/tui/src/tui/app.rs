@@ -1097,7 +1097,7 @@ impl AppMode {
             AppMode::Agent | AppMode::Auto => {
                 "Act mode - direct work in the current session with tools"
             }
-            AppMode::Yolo => "Act mode with Full Access (legacy YOLO permission shorthand)",
+            AppMode::Yolo => "Act mode with Full Access (legacy compatibility setting)",
             AppMode::Plan => "Plan mode - research and design before implementing",
             AppMode::Operate => "Operate mode - coordinate a Fleet for multi-step work",
         }
@@ -1774,6 +1774,10 @@ pub struct App {
     /// ready)` pairs; lookups fall back to "ready" for providers not present so
     /// an unknown entry is tried rather than silently skipped.
     provider_readiness: Vec<(ApiProvider, bool)>,
+    /// Session-local evidence from real provider requests and verification
+    /// probes. Unlike `provider_readiness` above, this never treats a saved key
+    /// as proof that the endpoint is healthy.
+    pub(crate) provider_health: crate::provider_readiness::ProviderReadinessSnapshot,
     /// Human-readable description of the last provider fallback event.
     pub last_fallback_reason: Option<String>,
     /// True when the active provider/base URL accepts arbitrary model IDs
@@ -2623,6 +2627,8 @@ impl App {
         let constrained_frame_rate = settings.constrained_frame_rate;
         let fancy_animations = settings.fancy_animations;
         let ocean_treatment = crate::tui::ocean::OceanTreatment::parse(&settings.ocean_treatment);
+        let work_surface_placement =
+            crate::tui::work_surface::WorkSurfacePlacement::parse(&settings.work_surface_placement);
         let synchronized_output_enabled = settings.synchronized_output_enabled();
         let status_indicator = settings.status_indicator.clone();
         let show_thinking = settings.show_thinking;
@@ -2864,7 +2870,9 @@ impl App {
                 selection_anchor: None,
             },
             viewport: ViewportState::default(),
-            work_surface: crate::tui::work_surface::WorkSurfaceState::default(),
+            work_surface: crate::tui::work_surface::WorkSurfaceState::with_placement(
+                work_surface_placement,
+            ),
             hunt: HuntState::default(),
             session: SessionState::default(),
             active_allowed_tools: None,
@@ -2898,6 +2906,7 @@ impl App {
             api_provider: provider,
             provider_chain,
             provider_readiness,
+            provider_health: crate::provider_readiness::ProviderReadinessSnapshot::default(),
             last_fallback_reason: None,
             model_ids_passthrough,
             active_route_limits,
@@ -3324,7 +3333,7 @@ impl App {
             let _ = settings.save();
         }
         self.push_status_toast(
-            "YOLO mode is deprecated — use Act + Bypass permissions (Shift+Tab)".to_string(),
+            "Legacy full-access mode is deprecated — use Act + Full Access (Shift+Tab)".to_string(),
             StatusToastLevel::Warning,
             Some(8_000),
         );

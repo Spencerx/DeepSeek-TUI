@@ -2710,6 +2710,13 @@ async fn run_event_loop(
                             })
                             .to_string();
                         app.last_effective_provider = Some(effective_turn_provider);
+                        if status == crate::core::events::TurnOutcomeStatus::Completed {
+                            app.provider_health.record_success(
+                                config,
+                                effective_turn_provider,
+                                &effective_turn_model,
+                            );
+                        }
                         if app.auto_model {
                             app.last_effective_model = Some(effective_turn_model.clone());
                         }
@@ -2944,6 +2951,17 @@ async fn run_event_loop(
                         recoverable: _,
                     } => {
                         let provider_before_error = app.api_provider;
+                        let (health_provider, health_model) = app
+                            .pending_turn_route
+                            .as_ref()
+                            .map(|(provider, model, _)| (*provider, model.clone()))
+                            .unwrap_or_else(|| (provider_before_error, app.model.clone()));
+                        app.provider_health.record_failure(
+                            config,
+                            health_provider,
+                            &health_model,
+                            &envelope,
+                        );
                         let rollback_after_auth_failure =
                             matches!(
                                 envelope.category,
@@ -8035,6 +8053,7 @@ async fn switch_provider(
                         config,
                         runtime_status,
                     )
+                    .map(|picker| picker.with_provider_health(&app.provider_health))
                 {
                     app.view_stack.push(picker);
                     app.status_message = Some(format!(
@@ -8841,7 +8860,8 @@ async fn apply_command_result(
                             config,
                             runtime_status,
                             app.provider_picker_memory.as_ref(),
-                        ),
+                        )
+                        .with_provider_health(&app.provider_health),
                     );
                 }
             }
@@ -8854,7 +8874,8 @@ async fn apply_command_result(
                             provider,
                             config,
                             runtime_status,
-                        ),
+                        )
+                        .with_provider_health(&app.provider_health),
                     );
                     app.status_message = Some("Provider setup catalog opened.".to_string());
                 }
@@ -9754,7 +9775,7 @@ fn plan_next_step_prompt() -> String {
     [
         "Action required: choose the next step for this plan.",
         "  1) Accept + implement in Act mode",
-        "  2) Accept + implement with Full Access (Act + bypass)",
+        "  2) Accept + implement with Full Access (trusted workspace)",
         "  3) Revise the plan / ask follow-ups",
         "  4) Return to Act mode without implementing",
         "",
@@ -10005,7 +10026,8 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     if !mention_menu_entries.is_empty() && app.mention_menu_selected >= mention_menu_entries.len() {
         app.mention_menu_selected = mention_menu_entries.len().saturating_sub(1);
     }
-    let top_work_strip_height = super::work_surface::height(app, size.width, size.height);
+    let top_work_strip_height =
+        super::work_surface::height(app, size.width, size.height, classic_shell);
 
     // Defensive two-pass layout: pin the header to the absolute top row,
     // then split the remaining body area for chat / preview / composer /
@@ -10084,8 +10106,13 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         ])
         .split(body_area);
 
+    let (work_chat_area, side_work_area) =
+        super::work_surface::split_chat(app, body_chunks[1], classic_shell);
+
     if top_work_strip_height > 0 {
         super::work_surface::render(f, body_chunks[0], app);
+    } else if let Some(work_area) = side_work_area {
+        super::work_surface::render(f, work_area, app);
     }
 
     if classic_shell {
@@ -10106,17 +10133,17 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         // resize) don't retain stale content from a previous frame.
         Block::default()
             .style(Style::default().bg(app.ui_theme.surface_bg))
-            .render(body_chunks[1], f.buffer_mut());
+            .render(work_chat_area, f.buffer_mut());
 
         // When the file-tree pane is visible and the terminal is wide
         // enough, reserve the left ~25% for the file tree.
         let mut chat_area =
-            if app.file_tree.is_some() && body_chunks[1].width >= SIDEBAR_VISIBLE_MIN_WIDTH {
+            if app.file_tree.is_some() && work_chat_area.width >= SIDEBAR_VISIBLE_MIN_WIDTH {
                 app.file_tree_visible = true;
                 let split = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
-                    .split(body_chunks[1]);
+                    .split(work_chat_area);
                 let tree_area = split[0];
                 let remaining = split[1];
 
@@ -10128,7 +10155,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
                 remaining
             } else {
                 app.file_tree_visible = false;
-                body_chunks[1]
+                work_chat_area
             };
         app.last_sidebar_host_width = Some(chat_area.width);
         let sidebar_area = if classic_shell
@@ -11131,7 +11158,8 @@ async fn handle_view_events(
                             Some(app.api_provider),
                             config,
                             runtime_status,
-                        ),
+                        )
+                        .with_provider_health(&app.provider_health),
                     );
                     app.status_message =
                         Some("Provider setup opened from /setup readiness.".to_string());
@@ -11865,6 +11893,23 @@ trait ProviderKeyVerifier {
 
 struct LiveProviderKeyVerifier;
 
+#[cfg(test)]
+fn provider_verification_error_category(reason: &str) -> crate::error_taxonomy::ErrorCategory {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("http 401") || lower.contains("status 401") {
+        crate::error_taxonomy::ErrorCategory::Authentication
+    } else if lower.contains("http 403") || lower.contains("status 403") {
+        crate::error_taxonomy::ErrorCategory::Authorization
+    } else if ["500", "502", "503", "504"]
+        .iter()
+        .any(|status| lower.contains(&format!("http {status}")))
+    {
+        crate::error_taxonomy::ErrorCategory::Network
+    } else {
+        crate::error_taxonomy::classify_error_message(reason)
+    }
+}
+
 impl ProviderKeyVerifier for LiveProviderKeyVerifier {
     fn verify<'a>(
         &'a self,
@@ -11908,6 +11953,7 @@ async fn apply_provider_picker_api_key_with_verifier(
                     runtime_status,
                     api_key,
                 )
+                .map(|picker| picker.with_provider_health(&app.provider_health))
             {
                 app.view_stack.push(picker);
                 app.status_message = Some(format!(
@@ -11935,6 +11981,7 @@ async fn apply_provider_picker_api_key_with_verifier(
                     runtime_status,
                     reason,
                 )
+                .map(|picker| picker.with_provider_health(&app.provider_health))
             {
                 app.view_stack.push(picker);
                 app.status_message = Some(format!(
@@ -13533,6 +13580,34 @@ mod provider_key_validation_tests {
             }),
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn provider_key_check_classifies_transport_failures_truthfully() {
+        assert_eq!(
+            provider_verification_error_category("connection refused"),
+            crate::error_taxonomy::ErrorCategory::Network
+        );
+        assert_eq!(
+            provider_verification_error_category("request timed out"),
+            crate::error_taxonomy::ErrorCategory::Timeout
+        );
+        assert_eq!(
+            provider_verification_error_category("HTTP 429 rate limit"),
+            crate::error_taxonomy::ErrorCategory::RateLimit
+        );
+        assert_eq!(
+            provider_verification_error_category("HTTP 401 unauthorized"),
+            crate::error_taxonomy::ErrorCategory::Authentication
+        );
+        assert_eq!(
+            provider_verification_error_category("HTTP 403 forbidden"),
+            crate::error_taxonomy::ErrorCategory::Authorization
+        );
+        assert_eq!(
+            provider_verification_error_category("HTTP 500 upstream failure"),
+            crate::error_taxonomy::ErrorCategory::Network
+        );
     }
 
     #[tokio::test]

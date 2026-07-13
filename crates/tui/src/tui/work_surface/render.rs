@@ -11,11 +11,28 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::app::{App, SidebarHoverRow, SidebarHoverSection};
 use crate::tui::ui_text::truncate_line_to_width;
 
-use super::model::{WorkHitbox, WorkRow, WorkTone, project};
+use super::model::{WorkHitbox, WorkRow, WorkSurfacePlacement, WorkTone, project};
+
+const SIDE_RAIL_MIN_HOST_WIDTH: u16 = 72;
+const SIDE_RAIL_MIN_WIDTH: u16 = 26;
+const SIDE_RAIL_MAX_WIDTH: u16 = 40;
+const SIDE_RAIL_MIN_CHAT_WIDTH: u16 = 40;
+
+fn effective_placement(
+    configured: WorkSurfacePlacement,
+    host_width: u16,
+    classic_shell: bool,
+) -> WorkSurfacePlacement {
+    if classic_shell || host_width < SIDE_RAIL_MIN_HOST_WIDTH {
+        WorkSurfacePlacement::Top
+    } else {
+        configured
+    }
+}
 
 /// Responsive work-surface height. The component owns a bounded window; long
 /// work lists scroll instead of consuming the transcript.
-pub fn height(app: &mut App, _width: u16, terminal_height: u16) -> u16 {
+pub fn height(app: &mut App, width: u16, terminal_height: u16, classic_shell: bool) -> u16 {
     let rows = project(app);
     if rows.is_empty() {
         app.work_surface.focused = false;
@@ -29,11 +46,63 @@ pub fn height(app: &mut App, _width: u16, terminal_height: u16) -> u16 {
         app.work_surface.scroll_offset = 0;
         return 0;
     }
+    app.work_surface.effective_placement =
+        effective_placement(app.work_surface.placement, width, classic_shell);
+    if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
+        return 0;
+    }
     match terminal_height {
         0..=12 => 3,
         13..=16 => 5,
         17..=23 => 6,
         _ => 8,
+    }
+}
+
+/// Split the transcript slot for a side rail. Top placement consumes its own
+/// vertical row before this point, so it returns the chat area unchanged.
+/// Classic always resolves to Top and therefore preserves its existing layout.
+pub fn split_chat(app: &mut App, area: Rect, classic_shell: bool) -> (Rect, Option<Rect>) {
+    let placement = effective_placement(app.work_surface.placement, area.width, classic_shell);
+    app.work_surface.effective_placement = placement;
+    if app.work_surface.latest_rows.is_empty() || placement == WorkSurfacePlacement::Top {
+        return (area, None);
+    }
+
+    let proportional = area.width.saturating_mul(30) / 100;
+    let rail_width = proportional
+        .clamp(SIDE_RAIL_MIN_WIDTH, SIDE_RAIL_MAX_WIDTH)
+        .min(area.width.saturating_sub(SIDE_RAIL_MIN_CHAT_WIDTH));
+    if rail_width < SIDE_RAIL_MIN_WIDTH {
+        app.work_surface.effective_placement = WorkSurfacePlacement::Top;
+        return (area, None);
+    }
+
+    let chat_width = area.width.saturating_sub(rail_width);
+    match placement {
+        WorkSurfacePlacement::Left => (
+            Rect {
+                x: area.x.saturating_add(rail_width),
+                width: chat_width,
+                ..area
+            },
+            Some(Rect {
+                width: rail_width,
+                ..area
+            }),
+        ),
+        WorkSurfacePlacement::Right => (
+            Rect {
+                width: chat_width,
+                ..area
+            },
+            Some(Rect {
+                x: area.x.saturating_add(chat_width),
+                width: rail_width,
+                ..area
+            }),
+        ),
+        WorkSurfacePlacement::Top => (area, None),
     }
 }
 
@@ -49,8 +118,25 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             .retain(|section| section.content_area != previous);
     }
 
+    let placement = app.work_surface.effective_placement;
+    let body_area = match placement {
+        WorkSurfacePlacement::Top => Rect {
+            height: area.height.saturating_sub(1),
+            ..area
+        },
+        WorkSurfacePlacement::Left => Rect {
+            width: area.width.saturating_sub(1),
+            ..area
+        },
+        WorkSurfacePlacement::Right => Rect {
+            x: area.x.saturating_add(1),
+            width: area.width.saturating_sub(1),
+            ..area
+        },
+    };
+
     let mut rows = project(app);
-    if area.height <= 3 {
+    if body_area.height <= 2 {
         // Compact fallback spends its two content rows on the first actionable
         // Task and To-do/worker objects instead of section chrome.
         let mut compact = Vec::new();
@@ -66,18 +152,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         }
         rows = compact;
     }
-    let body_height = usize::from(area.height.saturating_sub(1));
+    let body_height = usize::from(body_area.height);
     let overflow = rows.len() > body_height;
-    let inset = u16::from(area.width >= 60);
+    let inset = u16::from(body_area.width >= 60);
     let rail_width = u16::from(overflow);
     let content_area = Rect {
-        x: area.x.saturating_add(inset),
-        y: area.y,
-        width: area
+        x: body_area.x.saturating_add(inset),
+        y: body_area.y,
+        width: body_area
             .width
             .saturating_sub(inset.saturating_mul(2))
             .saturating_sub(rail_width),
-        height: area.height.saturating_sub(1),
+        height: body_area.height,
     };
 
     app.work_surface.visible_rows = body_height;
@@ -107,7 +193,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let style = row_style(app, row, selected || hovered);
         let controls = controls_text(app, row, content_area.width);
         let controls_width = UnicodeWidthStr::width(controls.as_str());
-        let compact_owner = if area.height <= 3 {
+        let compact_owner = if body_area.height <= 2 {
             row.id
                 .0
                 .split_once(':')
@@ -183,11 +269,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     Paragraph::new(lines).render(content_area, frame.buffer_mut());
-    render_rule(frame, area, app);
+    render_divider(frame, area, placement, app);
     if overflow {
         render_scrollbar(
             frame,
-            area,
+            body_area,
             app.work_surface.scroll_offset,
             body_height,
             rows.len(),
@@ -241,13 +327,30 @@ fn row_style(app: &App, row: &WorkRow, highlighted: bool) -> Style {
     style
 }
 
-fn render_rule(frame: &mut Frame, area: Rect, app: &App) {
-    let y = area.bottom().saturating_sub(1);
-    for x in area.left()..area.right() {
-        frame.buffer_mut()[(x, y)]
-            .set_symbol("─")
-            .set_fg(app.ui_theme.border)
-            .set_bg(app.ui_theme.surface_bg);
+fn render_divider(frame: &mut Frame, area: Rect, placement: WorkSurfacePlacement, app: &App) {
+    match placement {
+        WorkSurfacePlacement::Top => {
+            let y = area.bottom().saturating_sub(1);
+            for x in area.left()..area.right() {
+                frame.buffer_mut()[(x, y)]
+                    .set_symbol("─")
+                    .set_fg(app.ui_theme.border)
+                    .set_bg(app.ui_theme.surface_bg);
+            }
+        }
+        WorkSurfacePlacement::Left | WorkSurfacePlacement::Right => {
+            let x = if placement == WorkSurfacePlacement::Left {
+                area.right().saturating_sub(1)
+            } else {
+                area.left()
+            };
+            for y in area.top()..area.bottom() {
+                frame.buffer_mut()[(x, y)]
+                    .set_symbol("│")
+                    .set_fg(app.ui_theme.border)
+                    .set_bg(app.ui_theme.surface_bg);
+            }
+        }
     }
 }
 
@@ -259,7 +362,7 @@ fn render_scrollbar(
     total: usize,
     app: &App,
 ) {
-    let rail_height = area.height.saturating_sub(1);
+    let rail_height = area.height;
     if rail_height == 0 || total == 0 {
         return;
     }

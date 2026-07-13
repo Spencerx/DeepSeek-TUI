@@ -9,6 +9,9 @@ real_rustup_home=${RUSTUP_HOME:-${HOME}/.rustup}
 rustc_bin=$(RUSTUP_HOME="$real_rustup_home" rustup which rustc)
 toolchain_bin=${rustc_bin%/*}
 runs=${TUI_HERMETIC_RUNS:-2}
+filter=${TUI_HERMETIC_FILTER:-}
+
+"$repo_root/scripts/check-tui-product-vocabulary.sh"
 
 cleanup_roots=""
 cleanup() {
@@ -52,7 +55,12 @@ while [ "$run" -le "$runs" ]; do
     CARGO_HOME="$real_cargo_home" \
     RUSTUP_HOME="$real_rustup_home" \
     PATH="$toolchain_bin:$PATH" \
-      "$toolchain_bin/cargo" test --quiet -p codewhale-tui --bin codewhale-tui --locked
+      sh -c '
+        if [ -n "$1" ]; then
+          exec "$2" test --quiet -p codewhale-tui --bin codewhale-tui --locked "$1"
+        fi
+        exec "$2" test --quiet -p codewhale-tui --bin codewhale-tui --locked
+      ' sh "$filter" "$toolchain_bin/cargo"
   )
   run=$((run + 1))
 done

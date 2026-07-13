@@ -3284,7 +3284,8 @@ async fn provider_switch_model_override_updates_target_provider_model_slot() {
         .expect("provider/model result");
     assert!(provider_model_result.contains("provider=deepseek"));
     assert!(provider_model_result.contains("model=deepseek-v4-flash"));
-    assert!(provider_model_result.contains("auth=present/local"));
+    assert!(provider_model_result.contains("auth=key saved · not checked"));
+    assert!(provider_model_result.contains("health=attemptable"));
     assert!(!provider_model_result.contains("deepseek-key"));
 }
 
@@ -9670,7 +9671,8 @@ async fn model_picker_persists_model_and_reasoning_effort() {
         .expect("provider/model result");
     assert!(provider_model_result.contains("provider=deepseek"));
     assert!(provider_model_result.contains("model=deepseek-v4-pro"));
-    assert!(provider_model_result.contains("auth=present/local"));
+    assert!(provider_model_result.contains("auth=key saved · not checked"));
+    assert!(provider_model_result.contains("health=attemptable"));
     assert!(!provider_model_result.contains("test-key"));
 }
 
@@ -11502,7 +11504,8 @@ async fn provider_switch_auth_error_restores_previous_provider_and_model() {
         .expect("provider/model result");
     assert!(provider_model_result.contains("provider=deepseek"));
     assert!(provider_model_result.contains("model=deepseek-v4-pro"));
-    assert!(provider_model_result.contains("auth=present/local"));
+    assert!(provider_model_result.contains("auth=key saved · not checked"));
+    assert!(provider_model_result.contains("health=attemptable"));
     assert!(!provider_model_result.contains("moonshot"));
     assert!(!provider_model_result.contains("kimi-k2.6"));
     assert!(!provider_model_result.contains("deepseek-key"));

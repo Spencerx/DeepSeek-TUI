@@ -1509,7 +1509,7 @@ pub struct ToolsConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusItem {
-    /// "agent" / "yolo" / "plan" chip.
+    /// "act" / "plan" / "operate" chip.
     Mode,
     /// Model identifier (e.g. `deepseek-v4-pro`).
     Model,
@@ -1630,7 +1630,7 @@ impl StatusItem {
     #[must_use]
     pub fn hint(self) -> &'static str {
         match self {
-            StatusItem::Mode => "agent · yolo · plan",
+            StatusItem::Mode => "plan · act · operate",
             StatusItem::Model => "the model id you'll send to",
             StatusItem::Cost => "running total for this session",
             StatusItem::Status => "what the agent is doing right now",
@@ -6709,7 +6709,7 @@ fn provider_env_api_key(provider: ApiProvider) -> Option<String> {
     })
 }
 
-fn explicit_cli_api_key_override() -> Option<String> {
+pub(crate) fn explicit_cli_api_key_override() -> Option<String> {
     (std::env::var("DEEPSEEK_API_KEY_SOURCE").as_deref() == Ok("cli"))
         .then(|| {
             std::env::var("CODEWHALE_CLI_API_KEY")
@@ -6903,6 +6903,27 @@ fn now_unix_secs() -> Option<f64> {
 #[must_use]
 pub fn kimi_cli_credentials_present() -> bool {
     kimi_cli_oauth_credentials_path().is_ok_and(|path| path.exists())
+}
+
+/// Prompt-free structural check for Kimi CLI OAuth material. This deliberately
+/// performs no refresh: a fresh access token or a non-empty refresh token is
+/// enough to say login material is saved, while malformed/empty files are not.
+#[must_use]
+pub fn kimi_cli_credentials_valid() -> bool {
+    let Ok(path) = kimi_cli_oauth_credentials_path() else {
+        return false;
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(credential) = serde_json::from_str::<KimiOAuthCredential>(&raw) else {
+        return false;
+    };
+    kimi_oauth_access_token_is_fresh(&credential)
+        || credential
+            .refresh_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
 }
 
 /// Clear the API key from config-file storage.

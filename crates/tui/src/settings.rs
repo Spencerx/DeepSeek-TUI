@@ -234,6 +234,9 @@ pub struct Settings {
     /// Background treatment: `ombre` paints the terminal-native water column;
     /// `flat` preserves all state marks on the theme's plain surface.
     pub ocean_treatment: String,
+    /// Ocean Tasks / To-do / Workers rail placement: top, left, or right.
+    /// The lower edge remains owned by the composer and phase footer.
+    pub work_surface_placement: String,
     /// Runtime-only 30 FPS cap for terminals that flicker at high redraw
     /// rates. Separate from accessibility motion and text delivery.
     #[serde(skip)]
@@ -390,6 +393,7 @@ impl Default for Settings {
             low_motion: false,
             fancy_animations: true,
             ocean_treatment: "ombre".to_string(),
+            work_surface_placement: "top".to_string(),
             constrained_frame_rate: false,
             bracketed_paste: true,
             paste_burst_detection: true,
@@ -448,6 +452,14 @@ fn normalize_ocean_treatment(value: &str) -> &'static str {
         "flat"
     } else {
         "ombre"
+    }
+}
+
+fn normalize_work_surface_placement(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "left" => "left",
+        "right" => "right",
+        _ => "top",
     }
 }
 
@@ -528,6 +540,8 @@ impl Settings {
             }
             s.status_indicator = normalize_status_indicator(&s.status_indicator).to_string();
             s.ocean_treatment = normalize_ocean_treatment(&s.ocean_treatment).to_string();
+            s.work_surface_placement =
+                normalize_work_surface_placement(&s.work_surface_placement).to_string();
             s.synchronized_output =
                 normalize_synchronized_output(&s.synchronized_output).to_string();
             s.locale = normalize_configured_locale(&s.locale)
@@ -732,6 +746,15 @@ impl Settings {
                     );
                 }
                 self.ocean_treatment = normalized;
+            }
+            "work_surface_placement" | "work_surface" | "work_rail" => {
+                let normalized = value.trim().to_ascii_lowercase();
+                if !matches!(normalized.as_str(), "top" | "left" | "right") {
+                    anyhow::bail!(
+                        "Failed to update setting: invalid work surface placement '{value}'. Expected: top, left, or right."
+                    );
+                }
+                self.work_surface_placement = normalized;
             }
             "bracketed_paste" | "paste" => {
                 self.bracketed_paste = parse_bool(value)?;
@@ -981,6 +1004,10 @@ impl Settings {
         lines.push(format!("  low_motion:         {}", self.low_motion));
         lines.push(format!("  fancy_animations:   {}", self.fancy_animations));
         lines.push(format!("  ocean_treatment:    {}", self.ocean_treatment));
+        lines.push(format!(
+            "  work_surface:       {}",
+            self.work_surface_placement
+        ));
         lines.push(format!("  bracketed_paste:    {}", self.bracketed_paste));
         lines.push(format!(
             "  paste_burst_detect: {}",
@@ -1077,6 +1104,10 @@ impl Settings {
             (
                 "ocean_treatment",
                 "Transcript background treatment: ombre/flat (independent of motion)",
+            ),
+            (
+                "work_surface_placement",
+                "Ocean Tasks/To-do/Workers rail placement: top/left/right",
             ),
             (
                 "bracketed_paste",
@@ -1618,6 +1649,28 @@ mod tests {
 
         let err = settings.set("ocean_treatment", "kelp").unwrap_err();
         assert!(err.to_string().contains("ombre or flat"));
+    }
+
+    #[test]
+    fn work_surface_placement_persists_only_top_left_or_right() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.work_surface_placement, "top");
+
+        for placement in ["left", "right", "top"] {
+            settings
+                .set("work_surface_placement", placement)
+                .expect("valid placement");
+            assert_eq!(settings.work_surface_placement, placement);
+            let body = toml::to_string(&settings).expect("serialize settings");
+            let restored: Settings = toml::from_str(&body).expect("restore settings");
+            assert_eq!(restored.work_surface_placement, placement);
+        }
+
+        let err = settings
+            .set("work_surface_placement", "bottom")
+            .expect_err("bottom is owned by composer/footer");
+        assert!(err.to_string().contains("top, left, or right"));
+        assert_eq!(settings.work_surface_placement, "top");
     }
 
     /// Explicit animated baseline for env-force tests (#4095 flipped defaults to calm).

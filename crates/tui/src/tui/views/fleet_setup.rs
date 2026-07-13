@@ -13,9 +13,10 @@
 //! (`CmdFleetDescription`) is already localized.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
@@ -187,14 +188,14 @@ pub struct FleetSetupSnapshot {
     /// config / project), so the wizard can say when a chosen role would
     /// override an existing roster member.
     roster_members: Vec<(String, String)>,
-    /// `(canonical provider id, model id)` pairs selectable for a worker,
+    /// `(canonical provider id, model id, readiness label, selectable)` routes for a worker,
     /// drawn from ALL configured providers — not only the active one (#4093).
     /// Shown after `inherit` in the Model step so a Fleet worker can be pinned
     /// to a route independent of the parent/current provider. The provider id
     /// is the canonical [`crate::config::ApiProvider::as_str`] identifier
     /// (e.g. `"deepseek"`), not a display label — see
     /// [`cross_provider_model_routes`].
-    available_models: Vec<(String, String)>,
+    available_models: Vec<(String, String, String, bool)>,
 }
 
 impl FleetSetupSnapshot {
@@ -221,11 +222,17 @@ impl FleetSetupSnapshot {
                 .iter()
                 .map(|member| (member.id.to_lowercase(), member.origin.to_string()))
                 .collect();
+        let active_route_readiness = crate::provider_readiness::resolve_for_model(
+            config,
+            app.api_provider,
+            if app.auto_model { "auto" } else { &app.model },
+            &app.provider_health,
+        );
 
         Self {
             workspace: app.workspace.clone(),
             locale: app.ui_locale,
-            provider_ready: crate::config::has_api_key_for(config, app.api_provider),
+            provider_ready: active_route_readiness.can_attempt(),
             provider,
             model,
             reasoning: app.reasoning_effort_display_label(),
@@ -240,7 +247,11 @@ impl FleetSetupSnapshot {
             heartbeat_timeout_secs: config
                 .subagent_heartbeat_timeout_secs_for_provider(app.api_provider),
             roster_members,
-            available_models: cross_provider_model_routes(config, app.api_provider),
+            available_models: cross_provider_model_routes(
+                config,
+                app.api_provider,
+                &app.provider_health,
+            ),
         }
     }
 }
@@ -259,14 +270,54 @@ impl FleetSetupSnapshot {
 fn cross_provider_model_routes(
     config: &Config,
     active: crate::config::ApiProvider,
-) -> Vec<(String, String)> {
+    health: &crate::provider_readiness::ProviderReadinessSnapshot,
+) -> Vec<(String, String, String, bool)> {
     let mut routes = Vec::new();
     for provider in crate::provider_lake::configured_providers(config, active) {
+        // The bundled lake is only the baseline. A user may pin a valid
+        // provider-specific preview or private deployment outside that
+        // catalog, and Fleet must offer the same saved route that `/model`
+        // preserves. Keep saved/active models first, then append the lake.
+        let mut models = Vec::new();
+        if let Some(model) = config
+            .provider_config_for(provider)
+            .and_then(|entry| entry.model.as_deref())
+        {
+            push_unique_model(&mut models, model);
+        }
+        if provider == active {
+            let active_model = config.default_model();
+            if !active_model.trim().eq_ignore_ascii_case("auto") {
+                push_unique_model(&mut models, &active_model);
+            }
+        }
         for model in crate::provider_lake::models_for_provider(config, active, provider) {
-            routes.push((provider.as_str().to_string(), model));
+            push_unique_model(&mut models, &model);
+        }
+
+        for model in models {
+            let readiness =
+                crate::provider_readiness::resolve_for_model(config, provider, &model, health);
+            routes.push((
+                provider.as_str().to_string(),
+                model,
+                readiness.label().into_owned(),
+                readiness.can_attempt(),
+            ));
         }
     }
     routes
+}
+
+fn push_unique_model(models: &mut Vec<String>, model: &str) {
+    let model = model.trim();
+    if !model.is_empty()
+        && !models
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(model))
+    {
+        models.push(model.to_string());
+    }
 }
 
 /// Human-readable label for a canonical provider id, falling back to the raw
@@ -320,6 +371,13 @@ pub struct FleetSetupView {
     /// (the active route); later rows pin a concrete, possibly cross-provider
     /// route. Drives the review/copy so a pinned route names its own provider.
     model_routes: Vec<(String, String)>,
+    /// Whether the aligned Model row can be persisted. Missing-auth and
+    /// statically invalid routes remain visible with their reason but inert.
+    model_selectable: Vec<bool>,
+    /// Selectable rows registered by the latest render. Keeping mouse geometry
+    /// in the view gives the Fleet walkthrough the same row ownership as its
+    /// keyboard path without coupling the host to this modal's layout.
+    row_hitboxes: RefCell<Vec<(Rect, usize)>>,
 }
 
 impl FleetSetupView {
@@ -333,11 +391,14 @@ impl FleetSetupView {
         // `inherit` (index 0) maps to the active route; every later row pins a
         // concrete (provider, model) drawn from all configured providers.
         let mut model_routes = vec![(snapshot.provider.clone(), snapshot.model.clone())];
-        for (provider, model) in &snapshot.available_models {
+        let mut model_selectable = vec![true];
+        for (provider, model, readiness, selectable) in &snapshot.available_models {
             let provider_label = provider_display_label(provider);
             model_choices.push(Choice {
                 label: Cow::Owned(model.clone()),
-                summary: Cow::Owned(format!("Pin this model ({provider_label})")),
+                summary: Cow::Owned(format!(
+                    "Pin this model ({provider_label}) · {readiness}"
+                )),
                 description: Cow::Owned(format!(
                     "Route this worker to {model} on {provider_label} instead of inheriting the session route."
                 )),
@@ -345,6 +406,7 @@ impl FleetSetupView {
             // Canonical provider id (not the display label above) — this is
             // what gets persisted into the saved profile (#4093).
             model_routes.push((provider.clone(), model.clone()));
+            model_selectable.push(*selectable);
         }
         Self {
             snapshot,
@@ -358,6 +420,8 @@ impl FleetSetupView {
             model_draft_preview: None,
             model_choices,
             model_routes,
+            model_selectable,
+            row_hitboxes: RefCell::new(Vec::new()),
         }
     }
 
@@ -511,7 +575,14 @@ impl FleetSetupView {
                 ViewAction::None
             }
             Step::Model => {
-                self.step = Step::Thinking;
+                if self
+                    .model_selectable
+                    .get(self.model_idx)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    self.step = Step::Thinking;
+                }
                 ViewAction::None
             }
             Step::Thinking => {
@@ -635,6 +706,34 @@ impl ModalView for FleetSetupView {
         self
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.move_up(),
+            MouseEventKind::ScrollDown => self.move_down(),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let row = self.row_hitboxes.borrow().iter().find_map(|(rect, row)| {
+                    rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                        .then_some(*row)
+                });
+                if let Some(row) = row {
+                    match self.step {
+                        Step::Role => self.role_idx = row.min(ROLES.len().saturating_sub(1)),
+                        Step::Model => {
+                            self.model_idx = row.min(self.model_choices.len().saturating_sub(1));
+                        }
+                        Step::Thinking => {
+                            self.thinking_idx = row.min(THINKING_CHOICES.len().saturating_sub(1));
+                        }
+                        Step::Review => {}
+                    }
+                    self.discard_model_draft();
+                }
+            }
+            _ => {}
+        }
+        ViewAction::None
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
@@ -703,6 +802,7 @@ impl ModalView for FleetSetupView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.row_hitboxes.borrow_mut().clear();
         let popup_area = centered_modal_area(area, 96, 30, 60, 16);
         render_modal_surface(area, popup_area, buf);
 
@@ -753,34 +853,51 @@ impl ModalView for FleetSetupView {
                 if let Some(note) = self.roster_override_note() {
                     context.push(note);
                 }
-                render_choice_step(chunks[1], buf, &ROLES, self.role_idx, &context)
+                render_choice_step(chunks[1], buf, &ROLES, self.role_idx, &context);
+                register_choice_hitboxes(chunks[1], ROLES.len(), self.role_idx, &self.row_hitboxes);
             }
-            Step::Model => render_choice_step(
-                chunks[1],
-                buf,
-                &self.model_choices,
-                self.model_idx,
-                &[
-                    format!(
-                        "Current route: {} / {}  ·  reasoning {}",
-                        self.snapshot.provider, self.snapshot.model, self.snapshot.reasoning
-                    ),
-                    match self.selected_model() {
-                        Some(model) => format!("This worker will run on {model}."),
-                        None => "This worker inherits your current route.".to_string(),
-                    },
-                ],
-            ),
-            Step::Thinking => render_choice_step(
-                chunks[1],
-                buf,
-                THINKING_CHOICES,
-                self.thinking_idx,
-                &[
-                    format!("Current reasoning: {}", self.snapshot.reasoning),
-                    format!("This worker will use {}.", self.selected_thinking_label()),
-                ],
-            ),
+            Step::Model => {
+                render_choice_step(
+                    chunks[1],
+                    buf,
+                    &self.model_choices,
+                    self.model_idx,
+                    &[
+                        format!(
+                            "Current route: {} / {}  ·  reasoning {}",
+                            self.snapshot.provider, self.snapshot.model, self.snapshot.reasoning
+                        ),
+                        match self.selected_model() {
+                            Some(model) => format!("This worker will run on {model}."),
+                            None => "This worker inherits your current route.".to_string(),
+                        },
+                    ],
+                );
+                register_choice_hitboxes(
+                    chunks[1],
+                    self.model_choices.len(),
+                    self.model_idx,
+                    &self.row_hitboxes,
+                );
+            }
+            Step::Thinking => {
+                render_choice_step(
+                    chunks[1],
+                    buf,
+                    THINKING_CHOICES,
+                    self.thinking_idx,
+                    &[
+                        format!("Current reasoning: {}", self.snapshot.reasoning),
+                        format!("This worker will use {}.", self.selected_thinking_label()),
+                    ],
+                );
+                register_choice_hitboxes(
+                    chunks[1],
+                    THINKING_CHOICES.len(),
+                    self.thinking_idx,
+                    &self.row_hitboxes,
+                );
+            }
             Step::Review => self.render_review(chunks[1], buf),
         }
     }
@@ -1001,8 +1118,10 @@ fn render_choice_step(
 
     // List: labels are identifiers, so a `>`-marked single line each is safe.
     let list_width = usize::from(list_area.width);
-    let mut list_lines: Vec<Line> = Vec::with_capacity(choices.len());
-    for (idx, choice) in choices.iter().enumerate() {
+    let visible = choices.len().min(usize::from(list_area.height));
+    let row_start = choice_window_start(choices.len(), selected, visible);
+    let mut list_lines: Vec<Line> = Vec::with_capacity(visible);
+    for (idx, choice) in choices.iter().enumerate().skip(row_start).take(visible) {
         let is_selected = idx == selected;
         let pointer = if is_selected { "> " } else { "  " };
         let style = if is_selected {
@@ -1045,6 +1164,59 @@ fn render_choice_step(
     Paragraph::new(detail_lines)
         .wrap(Wrap { trim: true })
         .render(detail_area, buf);
+}
+
+/// Register exactly the list column/stack rows painted by
+/// [`render_choice_step`]. The detail pane intentionally owns no hitboxes.
+fn register_choice_hitboxes(
+    area: Rect,
+    choice_count: usize,
+    selected: usize,
+    hitboxes: &RefCell<Vec<(Rect, usize)>>,
+) {
+    if area.width == 0 || area.height == 0 || choice_count == 0 {
+        return;
+    }
+    let list_area = if area.width >= CHOICE_TWO_COLUMN_MIN_WIDTH {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(CHOICE_LIST_WIDTH),
+                Constraint::Min(CHOICE_DETAIL_MIN_WIDTH),
+            ])
+            .split(area)[0]
+    } else {
+        let list_height = (choice_count as u16 + 1).min(area.height.saturating_sub(1).max(1));
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(list_height), Constraint::Min(1)])
+            .split(area)[0]
+    };
+    let visible = choice_count.min(usize::from(list_area.height));
+    let row_start = choice_window_start(choice_count, selected, visible);
+    let mut rows = hitboxes.borrow_mut();
+    rows.extend((0..visible).map(|visible_idx| {
+        let choice_idx = row_start + visible_idx;
+        (
+            Rect::new(
+                list_area.x,
+                list_area.y.saturating_add(visible_idx as u16),
+                list_area.width,
+                1,
+            ),
+            choice_idx,
+        )
+    }));
+}
+
+fn choice_window_start(total: usize, selected: usize, visible: usize) -> usize {
+    if total <= visible || visible == 0 {
+        return 0;
+    }
+    selected
+        .saturating_add(1)
+        .saturating_sub(visible)
+        .min(total.saturating_sub(visible))
 }
 
 fn profile_file_status(workspace: &Path) -> (String, String) {
@@ -1122,8 +1294,18 @@ mod tests {
                 .map(|member| (member.id.to_lowercase(), member.origin.to_string()))
                 .collect(),
             available_models: vec![
-                ("deepseek".to_string(), "deepseek-v4-pro".to_string()),
-                ("deepseek".to_string(), "deepseek-v4-flash".to_string()),
+                (
+                    "deepseek".to_string(),
+                    "deepseek-v4-pro".to_string(),
+                    "key saved · not checked".to_string(),
+                    true,
+                ),
+                (
+                    "deepseek".to_string(),
+                    "deepseek-v4-flash".to_string(),
+                    "key saved · not checked".to_string(),
+                    true,
+                ),
             ],
         }
     }
@@ -1189,7 +1371,12 @@ mod tests {
         let mut snap = snapshot();
         snap.provider = "DeepSeek".to_string();
         snap.model = "deepseek-v4-pro".to_string();
-        snap.available_models = vec![("zai".to_string(), "glm-5.2".to_string())];
+        snap.available_models = vec![(
+            "zai".to_string(),
+            "glm-5.2".to_string(),
+            "key saved · not checked".to_string(),
+            true,
+        )];
         let mut view = FleetSetupView::from_snapshot(snap);
 
         // Role step: keep the first role. Model step: inherit(0), then the one
@@ -1353,6 +1540,86 @@ mod tests {
     }
 
     #[test]
+    fn mouse_selects_rows_and_wheel_matches_keyboard_navigation() {
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let (rect, row) = view.row_hitboxes.borrow()[2];
+
+        view.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(row, 2);
+        assert_eq!(view.role_idx, 2);
+
+        view.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(view.role_idx, 3);
+        view.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(view.role_idx, 2);
+    }
+
+    #[test]
+    fn compact_choice_window_keeps_deep_selection_visible_and_clickable() {
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        view.role_idx = ROLES.len() - 1;
+        let area = Rect::new(0, 0, 80, 16);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("> custom"), "{rendered}");
+        assert!(
+            view.row_hitboxes
+                .borrow()
+                .iter()
+                .any(|(_, idx)| *idx == ROLES.len() - 1),
+            "selected row needs an aligned mouse hitbox"
+        );
+    }
+
+    #[test]
+    fn profile_status_distinguishes_fresh_and_existing_workspaces() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        assert_eq!(
+            profile_file_status(temp.path()),
+            (
+                "0 files".to_string(),
+                "create .codewhale/agents/*.toml".to_string()
+            )
+        );
+
+        let profile_dir = temp.path().join(PROFILE_DIR);
+        std::fs::create_dir_all(&profile_dir).expect("profile dir");
+        std::fs::write(profile_dir.join("reviewer.toml"), "id = \"reviewer\"\n")
+            .expect("existing profile");
+        assert_eq!(
+            profile_file_status(temp.path()),
+            ("1 file".to_string(), PROFILE_DIR.to_string())
+        );
+    }
+
+    #[test]
     fn start_on_review_previews_inline_and_ratifies_starter_profile_for_selection() {
         let mut view = FleetSetupView::from_snapshot(snapshot());
         // Role: manager(0) scout(1) builder(2) -> builder.
@@ -1496,6 +1763,84 @@ mod tests {
                 .instructions
                 .as_deref()
                 .is_some_and(|text| text.contains("assigned Fleet slice"))
+        );
+    }
+
+    #[test]
+    fn fleet_model_rows_keep_failed_provider_visible_with_reason() {
+        let mut snap = snapshot();
+        snap.available_models = vec![(
+            "zai".to_string(),
+            "glm-5.2".to_string(),
+            "last check failed (authentication)".to_string(),
+            true,
+        )];
+        let view = FleetSetupView::from_snapshot(snap);
+        assert_eq!(view.model_choices.len(), 2);
+        assert!(
+            view.model_choices[1]
+                .summary
+                .contains("last check failed (authentication)")
+        );
+        assert_eq!(
+            view.model_routes[1],
+            ("zai".to_string(), "glm-5.2".to_string())
+        );
+    }
+
+    #[test]
+    fn fleet_invalid_route_stays_visible_but_cannot_advance() {
+        let mut snap = snapshot();
+        snap.available_models = vec![(
+            "zai".to_string(),
+            "broken-model".to_string(),
+            "invalid route".to_string(),
+            false,
+        )];
+        let mut view = FleetSetupView::from_snapshot(snap);
+        view.step = Step::Model;
+        view.model_idx = 1;
+
+        assert!(view.model_choices[1].summary.contains("invalid route"));
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Enter)),
+            ViewAction::None
+        ));
+        assert_eq!(view.step, Step::Model);
+    }
+
+    #[test]
+    fn fleet_includes_saved_model_outside_bundled_catalog() {
+        let mut providers = crate::config::ProvidersConfig::default();
+        providers.openrouter = crate::config::ProviderConfig {
+            api_key: Some("openrouter-test-key".to_string()),
+            model: Some("acme/private-preview".to_string()),
+            ..Default::default()
+        };
+        let config = Config {
+            provider: Some("openrouter".to_string()),
+            providers: Some(providers),
+            ..Default::default()
+        };
+
+        let routes = cross_provider_model_routes(
+            &config,
+            crate::config::ApiProvider::Openrouter,
+            &crate::provider_readiness::ProviderReadinessSnapshot::default(),
+        );
+
+        assert!(routes.iter().any(|(provider, model, _, selectable)| {
+            provider == "openrouter" && model == "acme/private-preview" && *selectable
+        }));
+        assert_eq!(
+            routes
+                .iter()
+                .filter(|(provider, model, _, _)| {
+                    provider == "openrouter" && model == "acme/private-preview"
+                })
+                .count(),
+            1,
+            "saved models must not be duplicated when the catalog later learns them"
         );
     }
 

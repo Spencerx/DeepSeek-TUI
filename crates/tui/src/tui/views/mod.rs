@@ -1210,7 +1210,7 @@ impl ConfigView {
             ConfigRow {
                 section: ConfigSection::Permissions,
                 key: "approval_mode".to_string(),
-                value: app.approval_mode.label().to_string(),
+                value: app.approval_mode.permission_chip_label().to_string(),
                 editable: true,
                 scope: ConfigScope::Session,
             },
@@ -1262,6 +1262,13 @@ impl ConfigView {
                 section: ConfigSection::Display,
                 key: "ocean_treatment".to_string(),
                 value: settings.ocean_treatment.clone(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
+                key: "work_surface_placement".to_string(),
+                value: settings.work_surface_placement.clone(),
                 editable: true,
                 scope: ConfigScope::Saved,
             },
@@ -1975,6 +1982,7 @@ fn config_label_for_key(key: &str) -> String {
         "locale" => "Language",
         "background_color" => "Background",
         "ocean_treatment" => "Ocean treatment",
+        "work_surface_placement" => "Work surface placement",
         "calm_mode" => "Calm mode",
         "low_motion" => "Low motion",
         "fancy_animations" => "Animations",
@@ -2068,6 +2076,7 @@ fn config_hint_for_key(key: &str) -> &'static str {
         }
         "background_color" => "#RRGGBB | default",
         "ocean_treatment" => "ombre | flat",
+        "work_surface_placement" => "top | left | right",
         "base_url" => "global DeepSeek/root fallback; e.g. https://api.deepseek.com/beta",
         "provider_url" => {
             "current provider endpoint; Xiaomi: token-plan | pay-as-you-go | custom URL"

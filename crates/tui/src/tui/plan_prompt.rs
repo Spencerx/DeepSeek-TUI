@@ -27,7 +27,7 @@ const PLAN_OPTIONS: [PlanOption; 4] = [
     },
     PlanOption {
         label: "Accept plan (Full Access)",
-        description: "Start implementation in Act with Full Access (bypass approvals)",
+        description: "Start implementation in Act without approval prompts",
         shortcut: 'y',
     },
     PlanOption {
@@ -822,9 +822,7 @@ mod tests {
         let rendered = render_view(&view, 110, 36);
 
         assert!(rendered.contains("> [2/y] Accept plan (Full Access)"));
-        assert!(
-            rendered.contains("Start implementation in Act with Full Access (bypass approvals)")
-        );
+        assert!(rendered.contains("Start implementation in Act without approval prompts"));
     }
 
     #[test]

@@ -161,7 +161,7 @@ Semantics:
   holds — a crafted constitution can never grant authority or weaken a gate
   above it.
 - **Not bypassable by mode.** Like the built-in safety floor, an `ask` hold
-  force-prompts in every mode, including YOLO; `block` always denies. Mode
+  force-prompts in every mode, including Full Access; `block` always denies. Mode
   cannot turn a hold off.
 - **Repo-local only.** Only the repo's `.codewhale/constitution.json`
   participates. The user-global constitution stays advisory prose and never
@@ -1104,6 +1104,11 @@ Common settings keys:
 - `paste_burst_detection` (on/off, default on): fallback rapid-key paste
   detection for terminals that do not emit bracketed-paste events. This is
   independent of terminal bracketed-paste mode.
+- `work_surface_placement` (`top`, `left`, or `right`; default `top`): places
+  Ocean's Tasks / To-do / Workers surface above the transcript or in a side
+  rail. Side choices fall back to the top layout on narrow terminals and in
+  Classic without changing the saved Ocean preference. Set it live with
+  `/config work_surface_placement right --save` (or `left` / `top`).
 - `mention_menu_limit` (integer, default `128`): maximum number of
   `@`-mention popup candidates retained before the composer renders the
   visible window. The visible rows still depend on terminal height.
@@ -1147,8 +1152,9 @@ Common settings keys:
   also kept locally for composer history search)
 - `default_model` (model name override)
 
-Only `agent`, `plan`, and `yolo` are visible modes in the UI. Switch between
-them with `/mode`. For compatibility, older settings files with
+Plan and Act are the everyday visible modes in the UI; Operate is an explicit
+preview entry while its Workflow control surface is still being built. Switch
+between them with `/mode`. For compatibility, older settings files with
 `default_mode = "normal"` still load as `agent`.
 
 Localization scope is tracked in [LOCALIZATION.md](LOCALIZATION.md). The v0.7.6
@@ -1220,7 +1226,7 @@ If you are upgrading from older releases:
   this keeps shell tools available with approval prompts; setting it to `false`
   hides shell tools. Headless, durable-task, and other noninteractive profiles
   keep the conservative omitted-field default and require `allow_shell = true`
-  to expose shell. Plan mode always hides shell; YOLO enables shell and
+  to expose shell. Plan mode always hides shell; Full Access enables shell and
   auto-approval.
 - `approval_policy` (string, optional): `on-request`, `untrusted`, or `never`. Runtime `approval_mode` editing in `/config` also accepts `on-request` and `untrusted` aliases.
 - `sandbox_mode` (string, optional): `read-only`, `workspace-write`, `danger-full-access`, `external-sandbox`.
@@ -1238,7 +1244,7 @@ If you are upgrading from older releases:
   approval handling, `allow` skips approval for matching invocations, and
   `ask` forces approval only in modes that can prompt. Outside the TUI
   auto-approve path, a matching `ask` rule under `approval_policy = "never"`
-  is rejected because no prompt can be shown. In YOLO / auto-approval sessions,
+  is rejected because no prompt can be shown. In Full Access / auto-approval sessions,
   `ask` rules do not downgrade the session into prompting or blocking; explicit
   `deny` rules still block according to the current execution-policy logic.
 

@@ -33,6 +33,7 @@ pub(crate) struct ModelRouteCandidate {
     pub(crate) thinking_supported: bool,
     pub(crate) cache_telemetry_supported: bool,
     pub(crate) auth_source: ModelAuthSource,
+    pub(crate) readiness: crate::provider_readiness::ResolvedProviderReadiness,
     pub(crate) default_for_provider: bool,
     pub(crate) tags: Vec<&'static str>,
 }
@@ -48,6 +49,16 @@ pub(crate) struct ModelInventory {
 
 impl ModelInventory {
     pub(crate) fn from_config(config: &Config) -> Self {
+        Self::from_config_with_health(
+            config,
+            &crate::provider_readiness::ProviderReadinessSnapshot::default(),
+        )
+    }
+
+    pub(crate) fn from_config_with_health(
+        config: &Config,
+        health: &crate::provider_readiness::ProviderReadinessSnapshot,
+    ) -> Self {
         let active_provider = config.api_provider();
         let mut candidates = Vec::new();
 
@@ -55,7 +66,6 @@ impl ModelInventory {
             let Some(auth_source) = auth_source_for_provider(config, provider) else {
                 continue;
             };
-
             let default_model = provider_default_model(config, provider);
             let mut models = Vec::<String>::new();
             if let Some(model) = configured_model_for_provider(config, provider) {
@@ -75,6 +85,11 @@ impl ModelInventory {
             }
 
             for model in models {
+                let readiness =
+                    crate::provider_readiness::resolve_for_model(config, provider, &model, health);
+                if !readiness.can_attempt() {
+                    continue;
+                }
                 let capability = provider_capability(provider, &model);
                 let mut tags = Vec::new();
                 if capability.context_window >= 1_000_000 {
@@ -104,6 +119,7 @@ impl ModelInventory {
                     thinking_supported: capability.thinking_supported,
                     cache_telemetry_supported: capability.cache_telemetry_supported,
                     auth_source: auth_source.clone(),
+                    readiness: readiness.clone(),
                     tags,
                 });
             }
@@ -189,6 +205,35 @@ fn provider_default_model(config: &Config, provider: ApiProvider) -> String {
 }
 
 fn auth_source_for_provider(config: &Config, provider: ApiProvider) -> Option<ModelAuthSource> {
+    if provider == ApiProvider::Custom {
+        let configured = config.provider_config_for(provider)?;
+        if crate::provider_readiness::credential_state_for_provider(config, provider)
+            == crate::provider_readiness::CredentialState::Local
+        {
+            return Some(ModelAuthSource::KeylessLocal);
+        }
+        if configured
+            .api_key_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .is_some_and(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
+        {
+            return Some(ModelAuthSource::Env);
+        }
+        if let Some(auth) = configured.auth.as_ref() {
+            return match auth.source {
+                codewhale_config::AuthSourceKind::Command => Some(ModelAuthSource::Command),
+                codewhale_config::AuthSourceKind::Secret => Some(ModelAuthSource::Secret),
+            };
+        }
+        return (configured
+            .api_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || crate::config::explicit_cli_api_key_override().is_some())
+        .then_some(ModelAuthSource::Config);
+    }
     if matches!(
         provider,
         ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm
@@ -223,6 +268,10 @@ fn provider_uses_oauth_cli(config: &Config, provider: ApiProvider) -> bool {
                 let mode = mode.trim().to_ascii_lowercase().replace('-', "_");
                 matches!(mode.as_str(), "kimi" | "kimi_oauth" | "kimi_cli" | "oauth")
             }),
+        ApiProvider::Xai => config
+            .provider_config_for(provider)
+            .and_then(|entry| entry.auth_mode.as_deref())
+            .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth),
         _ => false,
     }
 }
@@ -290,6 +339,39 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.provider == ApiProvider::Ollama
                     && candidate.auth_source == ModelAuthSource::KeylessLocal)
+        );
+    }
+
+    #[test]
+    fn inventory_includes_custom_api_key_env_route() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _custom_key = crate::test_support::EnvVarGuard::set("ACME_CUSTOM_KEY", "custom-key");
+        let config = Config {
+            provider: Some("acme".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom: std::collections::HashMap::from([(
+                    "acme".to_string(),
+                    crate::config::ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        base_url: Some("https://api.acme.test/v1".to_string()),
+                        model: Some("acme-coder".to_string()),
+                        api_key_env: Some("ACME_CUSTOM_KEY".to_string()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let inventory = ModelInventory::from_config(&config);
+        assert!(
+            inventory
+                .candidates
+                .iter()
+                .any(|candidate| candidate.provider == ApiProvider::Custom
+                    && candidate.model == "acme-coder"
+                    && candidate.auth_source == ModelAuthSource::Env)
         );
     }
 

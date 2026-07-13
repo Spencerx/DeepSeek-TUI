@@ -53,6 +53,7 @@ pub struct SettingsSection {
     pub low_motion: bool,
     pub fancy_animations: bool,
     pub ocean_treatment: OceanTreatmentValue,
+    pub work_surface_placement: WorkSurfacePlacementValue,
     pub paste_burst_detection: bool,
     pub show_thinking: bool,
     pub show_tool_details: bool,
@@ -236,6 +237,14 @@ pub enum TranscriptSpacingValue {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum WorkSurfacePlacementValue {
+    Top,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum DefaultModeValue {
     Agent,
     Plan,
@@ -344,6 +353,7 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             low_motion: settings.low_motion,
             fancy_animations: settings.fancy_animations,
             ocean_treatment: settings.ocean_treatment.as_str().into(),
+            work_surface_placement: settings.work_surface_placement.as_str().into(),
             paste_burst_detection: settings.paste_burst_detection,
             show_thinking: settings.show_thinking,
             show_tool_details: settings.show_tool_details,
@@ -507,6 +517,10 @@ pub fn apply_document(
         ("low_motion", bool_str(doc.settings.low_motion)),
         ("fancy_animations", bool_str(doc.settings.fancy_animations)),
         ("ocean_treatment", doc.settings.ocean_treatment.as_setting()),
+        (
+            "work_surface_placement",
+            doc.settings.work_surface_placement.as_setting(),
+        ),
         (
             "paste_burst_detection",
             bool_str(doc.settings.paste_burst_detection),
@@ -862,6 +876,26 @@ impl TranscriptSpacingValue {
             Self::Compact => "compact",
             Self::Comfortable => "comfortable",
             Self::Spacious => "spacious",
+        }
+    }
+}
+
+impl WorkSurfacePlacementValue {
+    fn as_setting(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+}
+
+impl From<&str> for WorkSurfacePlacementValue {
+    fn from(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "left" => Self::Left,
+            "right" => Self::Right,
+            _ => Self::Top,
         }
     }
 }

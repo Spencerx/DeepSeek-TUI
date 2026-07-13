@@ -9,8 +9,8 @@ mod model;
 mod render;
 
 pub use input::{handle_key, handle_mouse};
-pub use model::WorkSurfaceState;
-pub use render::{height, render};
+pub use model::{WorkSurfacePlacement, WorkSurfaceState};
+pub use render::{height, render, split_chat};
 
 #[cfg(test)]
 mod tests {
@@ -232,7 +232,7 @@ mod tests {
         app.work_surface.focused = true;
         app.task_panel.clear();
 
-        assert_eq!(super::height(&mut app, 80, 8), 0);
+        assert_eq!(super::height(&mut app, 80, 8, false), 0);
         assert!(app.work_surface.last_area.is_none());
         assert!(app.work_surface.hitboxes.is_empty());
         assert!(!app.work_surface.focused);
@@ -265,5 +265,104 @@ mod tests {
                 .as_ref()
                 .is_some_and(|id| id.0.starts_with("todo:"))
         );
+    }
+
+    #[test]
+    fn left_and_right_placements_reserve_a_side_rail() {
+        for (placement, expected_chat_x, expected_rail_x) in [
+            (super::WorkSurfacePlacement::Left, 30, 0),
+            (super::WorkSurfacePlacement::Right, 0, 70),
+        ] {
+            let mut app = app();
+            add_task(&mut app, "rail");
+            app.work_surface.placement = placement;
+            assert_eq!(super::height(&mut app, 100, 24, false), 0);
+
+            let area = ratatui::layout::Rect::new(0, 0, 100, 12);
+            let (chat, rail) = super::split_chat(&mut app, area, false);
+            let rail = rail.expect("side rail");
+            assert_eq!(chat.x, expected_chat_x);
+            assert_eq!(chat.width, 70);
+            assert_eq!(rail.x, expected_rail_x);
+            assert_eq!(rail.width, 30);
+
+            let backend = TestBackend::new(100, 12);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| super::render(frame, rail, &mut app))
+                .expect("draw");
+            assert_eq!(app.work_surface.last_area, Some(rail));
+            let divider_x = if placement == super::WorkSurfacePlacement::Left {
+                rail.right().saturating_sub(1)
+            } else {
+                rail.x
+            };
+            assert_eq!(terminal.backend().buffer()[(divider_x, 0)].symbol(), "│");
+        }
+    }
+
+    #[test]
+    fn side_rail_mouse_capture_stays_inside_the_rail() {
+        let mut app = app();
+        for id in ["one", "two", "three", "four"] {
+            add_task(&mut app, id);
+        }
+        app.work_surface.placement = super::WorkSurfacePlacement::Right;
+        assert_eq!(super::height(&mut app, 100, 24, false), 0);
+        let area = ratatui::layout::Rect::new(0, 0, 100, 4);
+        let (chat, rail) = super::split_chat(&mut app, area, false);
+        let rail = rail.expect("right rail");
+        let backend = TestBackend::new(100, 4);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, rail, &mut app))
+            .expect("draw");
+
+        let inside = super::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: rail.x.saturating_add(2),
+                row: rail.y.saturating_add(1),
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(inside.consumed);
+        assert!(app.work_surface.scroll_offset > 0);
+
+        let outside = super::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: chat.x.saturating_add(2),
+                row: chat.y.saturating_add(1),
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(!outside.consumed);
+    }
+
+    #[test]
+    fn classic_and_narrow_layouts_keep_the_existing_top_surface() {
+        let mut app = app();
+        add_task(&mut app, "top");
+        app.work_surface.placement = super::WorkSurfacePlacement::Right;
+
+        assert_eq!(super::height(&mut app, 100, 24, true), 8);
+        let area = ratatui::layout::Rect::new(0, 0, 100, 12);
+        let (chat, rail) = super::split_chat(&mut app, area, true);
+        assert_eq!(chat, area);
+        assert!(rail.is_none());
+        assert_eq!(
+            app.work_surface.placement,
+            super::WorkSurfacePlacement::Right,
+            "Classic fallback must not overwrite the saved Ocean preference"
+        );
+
+        assert_eq!(super::height(&mut app, 60, 16, false), 5);
+        let narrow = ratatui::layout::Rect::new(0, 0, 60, 8);
+        let (chat, rail) = super::split_chat(&mut app, narrow, false);
+        assert_eq!(chat, narrow);
+        assert!(rail.is_none());
     }
 }

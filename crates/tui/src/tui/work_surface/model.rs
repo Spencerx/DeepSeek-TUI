@@ -5,6 +5,36 @@ use crate::tools::subagent::{AgentWorkerStatus, SubAgentStatus};
 use crate::tools::todo::{TodoItem, TodoStatus};
 use crate::tui::app::{App, SidebarRowAction, TaskPanelEntry, TaskPanelEntryKind};
 
+/// Persisted Ocean work-surface placement. Bottom is deliberately absent: the
+/// composer and phase footer own the shell's lower edge.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WorkSurfacePlacement {
+    #[default]
+    Top,
+    Left,
+    Right,
+}
+
+impl WorkSurfacePlacement {
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "left" => Self::Left,
+            "right" => Self::Right,
+            _ => Self::Top,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_setting(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkRowId(pub String);
 
@@ -38,8 +68,10 @@ pub(super) struct WorkHitbox {
     pub stop_zone_end_col: Option<u16>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct WorkSurfaceState {
+    pub placement: WorkSurfacePlacement,
+    pub(super) effective_placement: WorkSurfacePlacement,
     pub focused: bool,
     pub selected: Option<WorkRowId>,
     pub scroll_offset: usize,
@@ -52,7 +84,31 @@ pub struct WorkSurfaceState {
     pub(super) latest_rows: Vec<WorkRow>,
 }
 
+impl Default for WorkSurfaceState {
+    fn default() -> Self {
+        Self::with_placement(WorkSurfacePlacement::Top)
+    }
+}
+
 impl WorkSurfaceState {
+    #[must_use]
+    pub fn with_placement(placement: WorkSurfacePlacement) -> Self {
+        Self {
+            placement,
+            effective_placement: placement,
+            focused: false,
+            selected: None,
+            scroll_offset: 0,
+            last_area: None,
+            visible_rows: 0,
+            total_rows: 0,
+            hovered: None,
+            hitboxes: Vec::new(),
+            cached_todos: Vec::new(),
+            latest_rows: Vec::new(),
+        }
+    }
+
     pub(super) fn selected_index(&self, rows: &[WorkRow]) -> Option<usize> {
         self.selected
             .as_ref()

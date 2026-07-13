@@ -223,7 +223,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             }
         }
         "provider" => Some(app.api_provider.as_str().to_string()),
-        "approval_mode" | "approval" => Some(app.approval_mode.label().to_string()),
+        "approval_mode" | "approval" => Some(app.approval_mode.permission_chip_label().to_string()),
         "allow_shell" | "shell" | "exec_shell" => Some(app.allow_shell.to_string()),
         "base_url" => {
             let config = match Config::load(app.config_path.clone(), app.config_profile.as_deref())
@@ -301,6 +301,9 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
         "max_history" | "history" => Some(app.max_input_history.to_string()),
         "sidebar_width" | "sidebar" => Some(app.sidebar_width_percent.to_string()),
         "sidebar_focus" | "focus" => Some(app.sidebar_focus.as_setting().to_string()),
+        "work_surface_placement" | "work_surface" | "work_rail" => {
+            Some(app.work_surface.placement.as_setting().to_string())
+        }
         "tool_collapse" | "tool_collapse_mode" | "collapse" => {
             Some(app.tool_collapse_mode.as_setting().to_string())
         }
@@ -1469,7 +1472,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                                 CommandResult::with_message_and_action(
                                     format!(
                                         "approval_mode = {} (saved to {} as approval_policy = \"{}\")",
-                                        m.label(),
+                                        m.permission_chip_label(),
                                         path.display(),
                                         saved
                                     ),
@@ -1483,14 +1486,14 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                         CommandResult::with_message_and_action(
                             format!(
                                 "approval_mode = {} (session only, add --save to persist)",
-                                m.label()
+                                m.permission_chip_label()
                             ),
                             AppAction::ModeChanged(app.mode),
                         )
                     }
                 }
                 None => CommandResult::error(
-                    "Invalid approval_mode. Use: auto, suggest/on-request/untrusted, bypass/full-access, never/deny",
+                    "Invalid approval_mode. Use: auto-review/auto, ask/suggest/on-request, full-access, never/deny",
                 ),
             };
         }
@@ -1509,7 +1512,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 " (session only, add --save to persist)".to_string()
             };
             let mode_hint = if enabled {
-                " Act mode will expose shell on the next turn with approval gating. Bypass permissions (Shift+Tab) also enables shell and auto-approves."
+                " Act mode will expose shell on the next turn with approval gating. Full Access (Shift+Tab) also enables shell and auto-approves."
             } else {
                 " Shell tools will be hidden on the next turn. Re-enable with `/config allow_shell true`."
             };
@@ -1688,6 +1691,14 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         "ocean_treatment" | "treatment" | "background_treatment" => {
             app.ocean_treatment =
                 crate::tui::ocean::OceanTreatment::parse(&settings.ocean_treatment);
+            app.needs_redraw = true;
+        }
+        "work_surface_placement" | "work_surface" | "work_rail" => {
+            app.work_surface.placement = crate::tui::work_surface::WorkSurfacePlacement::parse(
+                &settings.work_surface_placement,
+            );
+            app.work_surface.focused = false;
+            app.work_surface.last_area = None;
             app.needs_redraw = true;
         }
         "bracketed_paste" | "paste" => {
@@ -2507,6 +2518,30 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
     }
 
     #[test]
+    fn work_surface_config_applies_live_and_rejects_bottom() {
+        let mut app = create_test_app();
+
+        let result = set_config_value(&mut app, "work_surface_placement", "left", false);
+        assert!(!result.is_error, "{:?}", result.message);
+        assert_eq!(
+            app.work_surface.placement,
+            crate::tui::work_surface::WorkSurfacePlacement::Left
+        );
+        let shown = show_single_setting(&app, "work_surface_placement");
+        assert_eq!(
+            shown.message.as_deref(),
+            Some("work_surface_placement = left")
+        );
+
+        let result = set_config_value(&mut app, "work_surface_placement", "bottom", false);
+        assert!(result.is_error);
+        assert_eq!(
+            app.work_surface.placement,
+            crate::tui::work_surface::WorkSurfacePlacement::Left
+        );
+    }
+
+    #[test]
     fn sidebar_config_command_restores_pinned_sidebar_by_default() {
         let mut app = create_test_app();
         app.sidebar_focus = SidebarFocus::Hidden;
@@ -2904,9 +2939,7 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         assert!(msg.contains("Act mode"));
         assert!(msg.contains("approval gating"));
         assert!(msg.contains("next turn"));
-        assert!(
-            msg.contains("Bypass permissions (Shift+Tab) also enables shell and auto-approves")
-        );
+        assert!(msg.contains("Full Access (Shift+Tab) also enables shell and auto-approves"));
     }
 
     #[test]
@@ -2929,7 +2962,7 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         assert_eq!(
             msg,
             format!(
-                "allow_shell = true (saved to {}). Act mode will expose shell on the next turn with approval gating. Bypass permissions (Shift+Tab) also enables shell and auto-approves.",
+                "allow_shell = true (saved to {}). Act mode will expose shell on the next turn with approval gating. Full Access (Shift+Tab) also enables shell and auto-approves.",
                 config_path.display()
             )
         );
@@ -3437,7 +3470,7 @@ max_concurrent = 4
         assert_eq!(
             msg,
             format!(
-                "approval_mode = SUGGEST (saved to {} as approval_policy = \"on-request\")",
+                "approval_mode = Ask (saved to {} as approval_policy = \"on-request\")",
                 config_path.display()
             )
         );
