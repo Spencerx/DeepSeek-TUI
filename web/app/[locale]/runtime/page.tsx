@@ -1,6 +1,7 @@
-import Link from "next/link";
 import { Seal } from "@/components/seal";
 import { buildPageMetadata } from "@/lib/page-meta";
+
+const REPO_BLOB_BASE = "https://github.com/Hmbown/CodeWhale/blob/main";
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
@@ -19,8 +20,7 @@ interface Integration {
   name: string;
   desc: string;
   descZh: string;
-  href?: string;
-  docsHref?: string;
+  href: string;
 }
 
 const INTEGRATIONS: Integration[] = [
@@ -28,19 +28,19 @@ const INTEGRATIONS: Integration[] = [
     name: "HTTP / SSE Runtime API",
     desc: "Full local HTTP + Server-Sent Events runtime API on 127.0.0.1:7878. Create threads, stream turns, manage background jobs, and control approval decisions — all from any HTTP client or the bundled mobile page.",
     descZh: "完整的本地 HTTP + Server-Sent Events Runtime API，监听 127.0.0.1:7878。创建线程、流式对话、管理后台任务、控制审批决策——任意 HTTP 客户端或内置手机页面皆可调用。",
-    docsHref: "/en/docs#runtime-api",
+    href: `${REPO_BLOB_BASE}/docs/RUNTIME_API.md`,
   },
   {
     name: "ACP (Agent Client Protocol)",
     desc: "Baseline JSON-RPC adapter over stdio for compatible editor clients such as Zed. It supports initialize, new session, prompt, and cancel with text responses; shell and file tools, checkpoint replay, and session loading remain on the full Runtime API.",
     descZh: "面向 Zed 等兼容编辑器客户端的基础 JSON-RPC stdio 适配器。它支持初始化、新建会话、提示和取消，并返回文本响应；shell 与文件工具、检查点回放和会话加载仍由完整 Runtime API 提供。",
-    docsHref: "/en/docs#acp",
+    href: `${REPO_BLOB_BASE}/docs/RUNTIME_API.md`,
   },
   {
     name: "MCP (Model Context Protocol)",
     desc: "Connect Codewhale to external tools and services through configured MCP servers over stdio or HTTP/SSE, or expose Codewhale's own tools to another MCP client.",
     descZh: "通过已配置的 MCP 服务器（stdio 或 HTTP/SSE）将 Codewhale 连接到外部工具和服务，或把 Codewhale 自身工具暴露给其他 MCP 客户端。",
-    docsHref: "/en/docs#mcp",
+    href: `${REPO_BLOB_BASE}/docs/MCP.md`,
   },
   {
     name: "VS Code Extension",
@@ -148,18 +148,9 @@ export default async function RuntimePage({ params }: { params: Promise<{ locale
           {INTEGRATIONS.map((item) => (
             <div key={item.name} className="hairline rounded-lg p-5 bg-panel-1 hover:bg-panel-2 transition-colors">
               <h3 className="font-semibold text-base mb-2">
-                {item.href ? (
-                  <a href={item.href} target="_blank" rel="noopener noreferrer" className="body-link">
-                    {item.name} ↗
-                  </a>
-                ) : (
-                  <Link
-                    href={(item.docsHref ?? "/en/docs").replace(/^\/en/, isZh ? "/zh" : "/en")}
-                    className="body-link"
-                  >
-                    {item.name}
-                  </Link>
-                )}
+                <a href={item.href} target="_blank" rel="noopener noreferrer" className="body-link">
+                  {item.name} ↗
+                </a>
               </h3>
               <p className="text-sm text-ink-soft leading-relaxed">
                 {isZh ? item.descZh : item.desc}
@@ -175,16 +166,44 @@ export default async function RuntimePage({ params }: { params: Promise<{ locale
           {isZh ? (
             <>
               详细实现文档：{" "}
-              <Link href="/zh/docs" className="body-link">docs/RUNTIME_API.md</Link>
+              <a
+                href={`${REPO_BLOB_BASE}/docs/RUNTIME_API.md`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="body-link"
+              >
+                Runtime API 与 ACP stdio 适配器 ↗
+              </a>
               {" · "}
-              <Link href="/zh/docs#acp" className="body-link">ACP stdio 适配器</Link>
+              <a
+                href={`${REPO_BLOB_BASE}/docs/MCP.md`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="body-link"
+              >
+                MCP 集成 ↗
+              </a>
             </>
           ) : (
             <>
               Detailed implementation docs:{" "}
-              <Link href="/en/docs" className="body-link">docs/RUNTIME_API.md</Link>
+              <a
+                href={`${REPO_BLOB_BASE}/docs/RUNTIME_API.md`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="body-link"
+              >
+                Runtime API and ACP stdio adapter ↗
+              </a>
               {" · "}
-              <Link href="/en/docs#acp" className="body-link">ACP stdio adapter</Link>
+              <a
+                href={`${REPO_BLOB_BASE}/docs/MCP.md`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="body-link"
+              >
+                MCP integration ↗
+              </a>
             </>
           )}
         </p>

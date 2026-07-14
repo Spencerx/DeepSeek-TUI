@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 function pageSource(path: string): string {
@@ -30,6 +30,11 @@ describe("public website copy contracts", () => {
 
   it("describes ACP and the VS Code extension at their implemented capability level", () => {
     const runtime = pageSource("runtime/page.tsx");
+    const sourceDocTargets = [
+      ...new Set(
+        [...runtime.matchAll(/REPO_BLOB_BASE}\/([^`]+)`/g)].map((match) => match[1]),
+      ),
+    ];
 
     expect(runtime).toContain("ACP (Agent Client Protocol)");
     expect(runtime).toContain("Baseline JSON-RPC adapter over stdio");
@@ -37,6 +42,13 @@ describe("public website copy contracts", () => {
     expect(runtime).not.toContain("Agent Communication Protocol");
     expect(runtime).not.toContain("IETF-standard");
     expect(runtime).not.toContain("embeds Codewhale as a side-panel agent");
+    expect(runtime).not.toMatch(/\/(?:en|zh)\/docs#(?:runtime-api|acp|mcp)/);
+    expect(runtime).toContain("docs/RUNTIME_API.md");
+    expect(runtime).toContain("docs/MCP.md");
+    expect(sourceDocTargets).toEqual(["docs/RUNTIME_API.md", "docs/MCP.md"]);
+    for (const target of sourceDocTargets) {
+      expect(existsSync(new URL(`../../${target}`, import.meta.url)), target).toBe(true);
+    }
   });
 
   it("presents providers as peers and puts contributor actions near the top", () => {
