@@ -490,36 +490,14 @@ pub fn calculate_turn_cost_estimate_for_route(
 /// StepFun's standard API and Step Plan share provider/model text but not a
 /// billing system, so that route fails closed unless the PAYG surface is known.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn calculate_turn_cost_estimate_for_billing_surface(
     provider: ApiProvider,
     model: &str,
     billing_surface: Option<&str>,
     usage: &Usage,
 ) -> Option<CostEstimate> {
-    if provider == ApiProvider::Stepfun {
-        let pricing = pricing_for_billing_surface(provider, model, billing_surface)?;
-        return Some(cost_estimate_with_pricing(pricing, usage));
-    }
-    if model.trim().eq_ignore_ascii_case(DEFAULT_STEPFUN_MODEL) {
-        return None;
-    }
-    calculate_turn_cost_estimate_for_provider(provider, model, usage)
-}
-
-/// Estimate cache-write usage from a sourced catalog row when it publishes the
-/// separate write tier. Other usage continues through the legacy table, which
-/// retains CNY estimates and compatibility fallbacks.
-fn catalog_cost_estimate_from_offering(
-    offering: &codewhale_config::catalog::CatalogOffering,
-    usage: &Usage,
-) -> Option<CostEstimate> {
-    let usage = token_usage_for_pricing(usage);
-    let pricing = OfferingPricing::from_catalog_offering(offering)?;
-    if usage.cache_write == 0 || pricing.cache_write_per_million.is_none() {
-        return None;
-    }
-
-    pricing.estimate_cost(&usage).map(CostEstimate::usd_only)
+    calculate_turn_cost_estimate_for_route_at(provider, model, billing_surface, usage, Utc::now())
 }
 
 /// Deterministic provider-aware estimate at the turn's recorded time.
@@ -553,6 +531,19 @@ pub(crate) fn calculate_turn_cost_estimate_for_provider_at(
     } else {
         canonical_model
     };
+
+    // MiniMax-M3 doubles its published rates above 512K total input. The
+    // catalog row is necessarily static, so retain the usage-aware first-party
+    // table for both direct wire protocols after provider/model provenance has
+    // been canonicalized.
+    if matches!(
+        provider,
+        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic
+    ) && catalog_model.eq_ignore_ascii_case("minimax-m3")
+    {
+        let pricing = pricing_for_model_and_usage(&catalog_model, usage)?;
+        return Some(cost_estimate_with_pricing(pricing, usage));
+    }
 
     // Direct DeepSeek pricing carries an authoritative CNY row, and Sonnet 5
     // has a recorded-time introductory window that a static catalog row cannot
@@ -636,7 +627,7 @@ fn provider_owned_hand_pricing_at(
         ApiProvider::Moonshot => {
             matches!(model_lower.as_str(), "kimi-k2.6" | "kimi-k2.7-code")
         }
-        ApiProvider::Minimax => {
+        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => {
             matches!(model_lower.as_str(), "minimax-m3" | "minimax-m2.7")
         }
         ApiProvider::Arcee => {
@@ -740,6 +731,7 @@ fn calculate_turn_cost_from_usage_with_pricing(pricing: CurrencyPricing, usage: 
 /// when the model's pricing is unknown or the number of cache-hit tokens is
 /// zero (nothing to save).
 #[must_use]
+#[cfg(test)]
 pub fn calculate_cache_savings(model: &str, cache_hit_tokens: u32) -> Option<CostEstimate> {
     if cache_hit_tokens == 0 {
         return None;
@@ -1034,6 +1026,27 @@ mod tests {
             assert_eq!(pricing.usd.output_per_million, output);
         }
         assert!(calculate_cache_savings("MiniMax-M3", 1).is_none());
+    }
+
+    #[test]
+    fn provider_scoped_minimax_m3_keeps_usage_tiers_for_both_wire_protocols() {
+        for provider in [ApiProvider::Minimax, ApiProvider::MinimaxAnthropic] {
+            for (input_tokens, input_rate) in [(512_000, 0.30), (512_001, 0.60)] {
+                let usage = Usage {
+                    input_tokens,
+                    ..Usage::default()
+                };
+                let estimate = calculate_turn_cost_estimate_for_provider_at(
+                    provider,
+                    "MiniMax-M3",
+                    &usage,
+                    Utc::now(),
+                )
+                .expect("direct MiniMax route has authoritative pricing");
+                let expected = f64::from(input_tokens) / 1_000_000.0 * input_rate;
+                assert!((estimate.usd - expected).abs() < 1e-12, "{provider:?}");
+            }
+        }
     }
 
     #[test]

@@ -2781,6 +2781,11 @@ async fn run_event_loop(
                                 turn.route.as_ref().map(|route| (turn.created_at, route))
                             })
                             .and_then(|(created_at, route)| {
+                                let billing =
+                                    crate::route_billing::for_route(config, route.provider);
+                                if !billing.shows_money() {
+                                    return None;
+                                }
                                 crate::pricing::calculate_turn_cost_estimate_for_route_at(
                                     route.provider,
                                     &route.model,

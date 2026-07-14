@@ -926,7 +926,10 @@ mod tests {
         let card = Scorecard::from_turns(&turns);
 
         assert!((card.per_turn[0].cost_usd - 0.12).abs() < f64::EPSILON);
-        assert!((card.per_turn[1].cost_usd - 0.90).abs() < f64::EPSILON);
+        // MiniMax-M2.7 publishes a distinct cache-write rate (0.375/M),
+        // retained by the provider-owned fallback even without a priced
+        // catalog offering.
+        assert!((card.per_turn[1].cost_usd - 0.8475).abs() < f64::EPSILON);
         assert!(card.per_turn[..2].iter().all(|turn| !turn.cost_unpriced));
         assert!(card.per_turn[..2].iter().all(|turn| turn.cost_cny_unpriced));
         assert!(card.per_turn[2..].iter().all(|turn| turn.cost_unpriced));
