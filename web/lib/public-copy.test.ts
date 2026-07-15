@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { FACTS } from "./facts.generated";
+import { RELEASE_CONTRIBUTORS, RELEASE_HELPERS } from "./release-credits";
 
 function pageSource(path: string): string {
   return readFileSync(new URL(`../app/[locale]/${path}`, import.meta.url), "utf8");
@@ -85,5 +87,27 @@ describe("public website copy contracts", () => {
     expect(community).toContain("Hmbown/CodeWhale/pulls");
     expect(community).toContain("keeps the weekly archive of repository activity");
     expect(community).not.toContain("latest one sits near the top");
+  });
+
+  it("keeps current-release website credits in exact changelog parity", () => {
+    expect(FACTS.version).toBeTruthy();
+    const changelog = readFileSync(new URL("../../CHANGELOG.md", import.meta.url), "utf8");
+    const release = changelog
+      .split(`## [${FACTS.version}]`)[1]
+      ?.split("\n## ")[0];
+    const contributorSection = release
+      ?.split("### Contributors")[1]
+      ?.split("\n### ")[0];
+    expect(contributorSection, `missing ${FACTS.version} contributor ledger`).toBeTruthy();
+
+    const changelogHandles = [
+      ...new Set(contributorSection?.match(/@[A-Za-z0-9_-]+/g) ?? []),
+    ].sort();
+    const websiteHandles = [...RELEASE_CONTRIBUTORS, ...RELEASE_HELPERS];
+
+    expect(new Set(websiteHandles).size, "credit arrays must not overlap or repeat").toBe(
+      websiteHandles.length,
+    );
+    expect([...websiteHandles].sort()).toEqual(changelogHandles);
   });
 });
