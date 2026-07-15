@@ -51,6 +51,9 @@ quieter, docs-first community foundation.
   resolve on send; fuzzy matches stay in the completion popup instead of
   silently attaching an arbitrary same-name file (#4365 by @WavesMan, with the
   initial bounded-walk approach from #4367 by @LeoLin990405).
+- Keep the opt-in `remember` tool in the model-visible first-turn catalog so
+  durable preference capture works without requiring a model to discover a
+  tool it cannot yet know exists (#4373 by @Angel-Hair).
 - Honor each MCP server's advertised discovery capabilities before calling
   optional tools, resources, templates, or prompts; keep optional probes
   independently bounded and fail-soft (#4308 by @nsfoxer).
