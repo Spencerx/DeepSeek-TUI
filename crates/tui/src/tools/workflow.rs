@@ -4865,7 +4865,8 @@ reviewer = "reviewer"
                 json!({
                     "action": "run",
                     "source_path": "workflows/v0868_stopship_lane.workflow.js",
-                    "fleet": "v0868-stopship"
+                    "fleet": "v0868-stopship",
+                    "token_budget": 60_000
                 }),
                 &ctx,
             )
@@ -4876,6 +4877,18 @@ reviewer = "reviewer"
         assert_eq!(payload["status"], "completed", "{payload}");
         assert_eq!(payload["execution"]["status"], "succeeded", "{payload}");
         assert_eq!(calls.load(Ordering::SeqCst), 5, "one child per Fleet role");
+        let approval = &payload["plan_approval"];
+        assert_eq!(approval["decision"], "auto_read_only", "{approval}");
+        assert_eq!(approval["token_budget"], 60_000, "{approval}");
+        assert_eq!(approval["writes"], false, "{approval}");
+        assert_eq!(approval["shell"], false, "{approval}");
+        assert_eq!(approval["network"], false, "{approval}");
+        assert_eq!(approval["high_budget"], false, "{approval}");
+        assert_eq!(approval["elevated"], false, "{approval}");
+        assert!(
+            approval["reasons"].as_array().is_some_and(Vec::is_empty),
+            "{approval}"
+        );
 
         let events = payload["events"].as_array().expect("typed events");
         let started = events
