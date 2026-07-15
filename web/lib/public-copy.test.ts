@@ -104,10 +104,26 @@ describe("public website copy contracts", () => {
       ...new Set(contributorSection?.match(/@[A-Za-z0-9_-]+/g) ?? []),
     ].sort();
     const websiteHandles = [...RELEASE_CONTRIBUTORS, ...RELEASE_HELPERS];
+    const contributorDoc = readFileSync(
+      new URL("../../docs/CONTRIBUTORS.md", import.meta.url),
+      "utf8",
+    );
+    const currentDocBand = contributorDoc
+      .split(`<summary><strong>v${FACTS.version} `)[1]
+      ?.split("</details>")[0];
+    expect(currentDocBand, `missing ${FACTS.version} contributor-doc band`).toBeTruthy();
+    const docHandles = [
+      ...new Set(
+        [...(currentDocBand?.matchAll(/github\.com\/([A-Za-z0-9_-]+)\)/g) ?? [])].map(
+          (match) => `@${match[1]}`,
+        ),
+      ),
+    ].sort();
 
     expect(new Set(websiteHandles).size, "credit arrays must not overlap or repeat").toBe(
       websiteHandles.length,
     );
     expect([...websiteHandles].sort()).toEqual(changelogHandles);
+    expect(docHandles).toEqual(changelogHandles);
   });
 });
