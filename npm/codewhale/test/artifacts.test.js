@@ -107,3 +107,36 @@ test("allAssetNames includes every matrix entry", () => {
   assert.ok(allReleaseAssetNames().includes("codewhale.bat"));
   assert.ok(allReleaseAssetNames().includes("codew-android-arm64"));
 });
+
+test("CNB mirror URLs use the repository that publishes release assets", () => {
+  const keys = [
+    "CODEWHALE_RELEASE_BASE_URL",
+    "DEEPSEEK_TUI_RELEASE_BASE_URL",
+    "DEEPSEEK_RELEASE_BASE_URL",
+    "CODEWHALE_USE_CNB_MIRROR",
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    for (const key of keys) delete process.env[key];
+    process.env.CODEWHALE_USE_CNB_MIRROR = "1";
+    const { checksumManifestUrl, releaseAssetUrl, releaseBaseUrl } = require(ARTIFACTS_PATH);
+
+    assert.equal(
+      releaseBaseUrl("0.8.68"),
+      "https://cnb.cool/codewhale.net/codewhale/-/releases/v0.8.68/",
+    );
+    assert.equal(
+      releaseAssetUrl("codewhale-linux-x64", "0.8.68"),
+      "https://cnb.cool/codewhale.net/codewhale/-/releases/v0.8.68/codewhale-linux-x64",
+    );
+    assert.equal(
+      checksumManifestUrl("0.8.68"),
+      "https://cnb.cool/codewhale.net/codewhale/-/releases/v0.8.68/codewhale-artifacts-sha256.txt",
+    );
+  } finally {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});

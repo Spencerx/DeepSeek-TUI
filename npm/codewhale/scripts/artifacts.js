@@ -106,7 +106,7 @@ function releaseBaseUrl(version, repo = "Hmbown/CodeWhale") {
   // When CODEWHALE_USE_CNB_MIRROR is set, use the CNB (China-friendly)
   // mirror that already builds and publishes binary release assets.
   if (process.env.CODEWHALE_USE_CNB_MIRROR) {
-    return `https://cnb.cool/Hmbown/CodeWhale/-/releases/v${version}/`;
+    return `https://cnb.cool/codewhale.net/codewhale/-/releases/v${version}/`;
   }
   return `https://github.com/${repo}/releases/download/v${version}/`;
 }
