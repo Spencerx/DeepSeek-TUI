@@ -639,7 +639,11 @@ async fn release_queued_steering_ctrl_g_sends_now_with_clear_status() -> Result<
     enter_launch_session(&mut tui)?;
 
     type_and_submit(&mut tui, "initial slow turn")?;
-    wait_for_counter(&mut tui, &initial_requests, 1, Duration::from_secs(3))?;
+    // Use the same bounded interaction budget as the rest of this PTY gate.
+    // Cold debug binaries can take more than three seconds to reach the
+    // loopback server while release builds and workspace tests run in parallel.
+    // A dead engine still fails closed because the counter never advances.
+    wait_for_counter(&mut tui, &initial_requests, 1, INTERACTION_TIMEOUT)?;
 
     type_and_tab(&mut tui, "queued steering from ctrl-g")?;
     tui.wait_for_text("Ctrl+G send", Duration::from_secs(5))?;
