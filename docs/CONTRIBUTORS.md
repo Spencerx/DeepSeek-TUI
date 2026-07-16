@@ -28,11 +28,12 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
-<summary><strong>v0.8.68 — maintenance sweep, runtime persistence &amp; release evidence</strong></summary>
+<summary><strong>v0.9.0 — underwater shell, runtime persistence &amp; release evidence</strong></summary>
 
-The v0.8.68 maintenance lane started with post-release cleanup on `main`: runtime
-thread persistence, terminal selection, UTF-8 edit handling, README discovery,
-and dead-code removal landed alongside Cursor dogfood evidence for v0.8.67.
+The v0.9.0 lane grew from a maintenance sweep into the underwater shell,
+message-first Operate, broader Fleet and Workflow behavior, runtime-thread
+persistence, terminal selection, UTF-8 handling, internationalization, and
+release evidence. The reports and pull requests below materially shaped it.
 
 - **[Amuthan / amuthantamil](https://github.com/amuthantamil)** — approval-time
   transcript review report that led to live Page Up/Down, modified-arrow,

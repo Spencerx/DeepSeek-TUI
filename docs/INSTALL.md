@@ -24,7 +24,7 @@ verifies them against `codewhale-artifacts-sha256.txt`, installs to
 
 Codewhale ships matched `codewhale`, `codew`, and `codewhale-tui` prebuilt binaries for
 the supported platform/architecture combinations below. Android/Termux is a
-preview in v0.8.68 pending real-device QA. Linux ARM64 is available from v0.8.8
+preview in v0.9.0 pending real-device QA. Linux ARM64 is available from v0.8.8
 onward. Linux RISC-V prebuilts are temporarily paused because the locked
 `rquickjs-sys` dependency does not ship `riscv64gc-unknown-linux-gnu` bindings.
 
@@ -46,7 +46,7 @@ onward. Linux RISC-V prebuilts are temporarily paused because the locked
   [Build from source](#7-build-from-source) below.
 ³ RISC-V source builds currently need upstream `rquickjs-sys` RISC-V bindings or
   a bindgen-enabled dependency build.
-⁴ The Android/Termux build and setup paths are implemented, but v0.8.68 remains
+⁴ The Android/Termux build and setup paths are implemented, but v0.9.0 remains
   preview-only until the real-device compile, startup, approval, file-tool, and
   update checks tracked in #4236 and #4242 are complete.
 
@@ -225,11 +225,11 @@ a download sourced from an impersonating repository or mirror.
 ## 3. Install via npm
 
 npm is the recommended install path. The `codewhale` wrapper is published at
-v0.8.68 (Node 18+; wrapper available for v0.8.56 and later).
+v0.9.0 (Node 18+; wrapper available for v0.8.56 and later).
 
 ```bash
 npm install -g codewhale
-codewhale --version   # 0.8.68
+codewhale --version   # 0.9.0
 ```
 
 `postinstall` downloads the right pair of binaries from the matching GitHub

@@ -4,7 +4,7 @@
 > release candidate.** v0.8.68 has not yet been tagged or publicly published,
 > and the waves/checkmarks below are not proof that current acceptance criteria
 > or release gates pass. Use the current
-> [v0.8.68 release-candidate ledger](releases/v0.8.68-release-candidate.md) for
+> [v0.9.0 release-candidate ledger](releases/v0.9.0-release-candidate.md) for
 > release truth. The settled product vocabulary remains useful and should not
 > be re-derived: **Fleet = who · Workflow = what order · Lane = running
 > instance · Runtime = where/how**. The architecture/dogfood issues linked

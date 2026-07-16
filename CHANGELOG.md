@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.68] - 2026-07-15
+## [0.9.0] - 2026-07-15
 
-Codewhale v0.8.68 replaces the default terminal shell with the underwater
+Codewhale v0.9.0 replaces the default terminal shell with the underwater
 interaction system, makes Operate message-first, and hardens the Fleet,
 Workflow, routing, accounting, and release surfaces that support day-to-day
 agent work. The release also expands localization and gives the public site a
@@ -81,6 +81,15 @@ quieter, docs-first community foundation.
   saved provider against live configuration before creating a client, never
   infer a provider from the model ID, and fail closed when the named route was
   removed, invalid, or ambiguous (#4334).
+- Make hosted runtime threads deterministic and provider-exact: serialize
+  thread, turn, and event mutation; keep cancellation ownership with the host;
+  preserve the selected provider through every durable turn; terminalize
+  exceptional streams once; and prevent the runtime manager from silently
+  dispatching unclaimed goal continuations or child turns.
+- Treat required user confirmation as a real goal blocker instead of a failed
+  goal, and explain how to recover when a previously cached approval is denied.
+  Both states now remain visible and actionable across all shipped locales
+  instead of looking like unexplained model or tool failure (#4374, #4375).
 - Make Fleet launch and teardown deterministic: route flags are placed before
   `exec`, workers are contained in owned Unix sessions or Windows Job Objects,
   and cancellation reaps surviving descendants with bounded escalation before
@@ -155,8 +164,14 @@ quieter, docs-first community foundation.
   (foreground-only for Terminal), a typed treatment setting replaces string
   comparisons, reduced motion freezes life legibly, `fancy_animations =
   false` stills the chrome, and typing scatters the fish immediately. Fish
-  keep a one-cell gap from occupied text; the whale stays the single still
-  brand mark.
+  keep a one-cell gap from occupied text; the whale remains the single brand
+  mark and returns to stillness between caustic sweeps.
+- Bring the whale mark to life with a soft diagonal caustic sweep, then let it
+  genuinely rest. Active markers now share a smoother 8 Hz clock after the
+  existing earned-motion delay, while reduced motion, hidden/off-screen views,
+  modal ownership, and compact-terminal redraw budgets remain authoritative.
+  The motion is adapted from the Apache-2.0 Grok Build interaction language,
+  not copied as a global pulse or high-frequency receipt cascade.
 - Keep compact terminals operable: `/config` and `/resume` collapse
   secondary chrome before sacrificing their selectable rows at 40x12 and
   60x16, bodies budget for the footer's real wrapped height, and the
@@ -203,6 +218,11 @@ quieter, docs-first community foundation.
 
 ### Added
 
+- Thinking Machines Lab's Inkling through Together using the exact wire model
+  `thinkingmachines/inkling`, with `inkling` and `together-inkling` aliases and
+  exact `none` / `minimal` / `low` / `medium` / `high` / `max` reasoning
+  values. Codewhale does not invent a context window, price, or offline picker
+  claim while the provider's public catalog metadata remains inconsistent.
 - MiniMax Messages provider support for MiniMax-M3 and MiniMax-M2.7, with
   OpenAI-compatible and Messages routes, regional endpoint guidance, request
   coverage, catalog limits, and tier-aware pricing (PR #4354 by @octo-patch).
@@ -463,11 +483,12 @@ quieter, docs-first community foundation.
 
 - YOLO mode: `--yolo`, `default_mode = "yolo"`, and the hotbar YOLO action
   now map to Act + Full Access permissions via a compatibility shim and
-  show a one-shot deprecation notice; removal is planned for 0.9.0.
+  show a one-shot deprecation notice. Removal is deferred beyond v0.9.0 so
+  this release does not break existing scripts without a dedicated cutover.
 
 ### Known issues
 
-- Android/Termux arm64 remains a preview in v0.8.68. The target, asset wiring,
+- Android/Termux arm64 remains a preview in v0.9.0. The target, asset wiring,
   updater selection, dependency graph, and source-build path have automated or
   static coverage, but shell/PTY/config/TUI startup and runtime behavior remain
   unverified on a real device (#4236, #4242). Do not use a GNU/Linux arm64
@@ -476,7 +497,7 @@ quieter, docs-first community foundation.
 ### Contributors
 
 Thank you to the international community whose code, reports, reviews, and
-reproductions shaped v0.8.68:
+reproductions shaped v0.9.0:
 
 - [@amuthantamil](https://github.com/amuthantamil),
   [@bistack](https://github.com/bistack),
@@ -3397,8 +3418,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.68...HEAD
-[0.8.68]: https://github.com/Hmbown/CodeWhale/compare/v0.8.67...v0.8.68
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Hmbown/CodeWhale/compare/v0.8.67...v0.9.0
 [0.8.67]: https://github.com/Hmbown/CodeWhale/compare/v0.8.66...v0.8.67
 [0.8.66]: https://github.com/Hmbown/CodeWhale/compare/v0.8.65...v0.8.66
 [0.8.65]: https://github.com/Hmbown/CodeWhale/compare/v0.8.64...v0.8.65
