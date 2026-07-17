@@ -231,7 +231,7 @@ mod tests {
             "expected zh-Hans 'key' label, got: {body}"
         );
         assert!(
-            body.contains("Enter 保存"),
+            body.contains("按 Enter 继续"),
             "expected zh-Hans footer, got: {body}"
         );
 
@@ -253,8 +253,24 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            body.contains("Press Enter to save"),
+            body.contains("Press Enter to continue"),
             "expected en footer, got: {body}"
         );
+    }
+
+    #[test]
+    fn local_provider_copy_makes_the_key_optional() {
+        let mut app = test_app_with_locale(Locale::En);
+        app.onboarding_provider = ApiProvider::Ollama;
+        let body = lines(&app)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(body.contains("Local runtimes usually need no pasted key"));
+        assert!(body.contains("If this provider requires a key"));
+        assert!(body.contains("paste key here if required"));
+        assert!(body.contains("Press Enter to continue"));
     }
 }
