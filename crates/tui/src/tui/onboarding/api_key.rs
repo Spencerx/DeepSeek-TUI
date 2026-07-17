@@ -26,14 +26,22 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
             Style::default().fg(palette::TEXT_PRIMARY),
         )),
     ];
-    if let Some(url) = provider.credential_url() {
+    let credential_help = provider.credential_help();
+    if let Some(url) = credential_help.credential_url {
         lines.push(Line::from(Span::styled(
             url.to_string(),
             Style::default().fg(palette::TEXT_MUTED),
         )));
-    } else {
+    } else if credential_help.acquisition
+        == codewhale_config::provider::CredentialAcquisition::LocalOptional
+    {
         lines.push(Line::from(Span::styled(
             app.tr(MessageId::OnboardApiKeyLocalHint).to_string(),
+            Style::default().fg(palette::TEXT_MUTED),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            credential_help.guidance.to_string(),
             Style::default().fg(palette::TEXT_MUTED),
         )));
     }
@@ -272,5 +280,22 @@ mod tests {
         assert!(body.contains("If this provider requires a key"));
         assert!(body.contains("paste key here if required"));
         assert!(body.contains("Press Enter to continue"));
+    }
+
+    #[test]
+    fn kimi_onboarding_points_to_the_api_key_console_and_paste_path() {
+        let mut app = test_app_with_locale(Locale::En);
+        app.onboarding_provider = ApiProvider::Moonshot;
+        let body = lines(&app)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(body.contains("https://platform.kimi.ai/console/api-keys"));
+        assert!(body.contains("paste it below"));
+        assert!(body.contains("paste key here if required"));
+        assert!(!body.contains("OAuth"));
+        assert!(!body.contains("device login"));
     }
 }
