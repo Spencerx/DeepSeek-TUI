@@ -293,18 +293,25 @@ pub fn repair_json_text_once(raw: &str) -> String {
         .map(str::trim)
         .unwrap_or(trimmed);
 
-    let obj_start = without_fence.find('{');
-    let arr_start = without_fence.find('[');
+    let obj_candidate = slice_json_payload(without_fence, '{', '}');
+    let arr_candidate = slice_json_payload(without_fence, '[', ']');
 
-    match (obj_start, arr_start) {
-        (Some(o), Some(a)) if o < a => slice_json_payload(without_fence, '{', '}'),
-        (Some(_), Some(_)) => slice_json_payload(without_fence, '[', ']'),
-        (Some(_), None) => slice_json_payload(without_fence, '{', '}'),
-        (None, Some(_)) => slice_json_payload(without_fence, '[', ']'),
-        (None, None) => None,
+    match (obj_candidate, arr_candidate) {
+        (Some(obj), Some(arr)) => {
+            // Find which one starts first in the original string
+            // slice_json_payload already validates they have matching open/close
+            let obj_start = without_fence.find(obj).unwrap_or(usize::MAX);
+            let arr_start = without_fence.find(arr).unwrap_or(usize::MAX);
+            if obj_start < arr_start {
+                obj.to_string()
+            } else {
+                arr.to_string()
+            }
+        }
+        (Some(obj), None) => obj.to_string(),
+        (None, Some(arr)) => arr.to_string(),
+        (None, None) => without_fence.to_string(),
     }
-    .unwrap_or(without_fence)
-    .to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -502,11 +509,13 @@ mod tests {
         assert_eq!(provider.model(), "fast");
         assert_eq!(response.text, "mock response");
     }
-
     #[test]
     fn test_repair_json_text_once() {
         // Plain JSON object
-        assert_eq!(repair_json_text_once(r#"{"key": "value"}"#), r#"{"key": "value"}"#);
+        assert_eq!(
+            repair_json_text_once(r#"{"key": "value"}"#),
+            r#"{"key": "value"}"#
+        );
 
         // Plain JSON array
         assert_eq!(repair_json_text_once(r#"[1, 2, 3]"#), r#"[1, 2, 3]"#);
@@ -553,7 +562,7 @@ mod tests {
             r#"[{"key": "value"}]"#
         );
 
-        // Fenced JSON embedded in text (strips fence first, then slices if needed)
+        // Fenced JSON embedded in text
         assert_eq!(
             repair_json_text_once("Here is the JSON:\n```json\n{\"key\": \"value\"}\n```\nDone."),
             r#"{"key": "value"}"#
@@ -569,6 +578,17 @@ mod tests {
         assert_eq!(
             repair_json_text_once("```json\nJust some plain text\n```"),
             "Just some plain text"
+        );
+
+        // REGRESSION FIX: Unmatched opening bracket should not block finding a balanced one
+        assert_eq!(repair_json_text_once("[note {\"ok\":1}"), r#"{"ok":1}"#);
+
+        // Control: Nested inside string escapes should be preserved correctly if balanced
+        // (This tests we don't just grab the first '{' without considering the full payload,
+        // though `slice_json_payload` is simple rfind/find right now)
+        assert_eq!(
+            repair_json_text_once(r#"Prefix text {"data": "[nested]"} postfix text"#),
+            r#"{"data": "[nested]"}"#
         );
     }
 }
