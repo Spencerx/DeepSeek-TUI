@@ -6169,6 +6169,7 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
         }),
+        auto_route_receipt: None,
     });
 
     let recovered = reconcile_turn_liveness(&mut app, now, false);
@@ -6209,6 +6210,7 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
         }),
+        auto_route_receipt: None,
     });
     let thinking_idx = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
     crate::tui::streaming_thinking::append(&mut app, thinking_idx, "partial reasoning");
@@ -6273,6 +6275,7 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
         }),
+        auto_route_receipt: None,
     });
 
     let recovered = recover_engine_event_disconnect(&mut app);
@@ -8521,7 +8524,19 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
     let mut app = create_test_app();
     app.suppress_stream_events_until_turn_complete = true;
     app.ocean_completion_started_at = Some(Instant::now());
-    app.pending_turn_route = Some((ApiProvider::Deepseek, "pending-model".to_string(), false));
+    app.pending_turn_route = Some((ApiProvider::Deepseek, "pending-model".to_string(), true));
+    app.pending_auto_route_receipt = Some(crate::model_routing::AutoRouteReceipt {
+        tier: crate::model_routing::AutoRouteTier::Fast,
+        pair: crate::model_routing::AutoRoutePair {
+            strong: "deepseek-v4-pro".to_string(),
+            fast: Some("deepseek-v4-flash".to_string()),
+        },
+        scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
+        data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
+        reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
+            crate::model_routing::AutoRouteHeuristicReason::ShortRequest,
+        ),
+    });
     let created_at = chrono::Utc::now();
     let event = EngineEvent::TurnStarted {
         turn_id: "turn_cancel_race".to_string(),
@@ -8543,7 +8558,15 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
     assert_eq!(route.provider, ApiProvider::Openai);
     assert_eq!(route.model, "gpt-5.5");
     assert!(route.auto_model);
+    assert_eq!(
+        active_turn
+            .auto_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.tier),
+        Some(crate::model_routing::AutoRouteTier::Fast)
+    );
     assert!(app.pending_turn_route.is_none());
+    assert!(app.pending_auto_route_receipt.is_none());
     assert!(app.ocean_completion_started_at.is_none());
 
     let observer = turn_end_observer_metadata(Some(active_turn));

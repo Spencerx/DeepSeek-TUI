@@ -771,6 +771,7 @@ pub(crate) fn provider_scoped_model_completion_ids(app: &App) -> Vec<String> {
 
 fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> {
     let mut rows = Vec::new();
+    let auto_hint = auto_picker_hint(app, config);
     // One snapshot supplies both IDs, capabilities, and freshness so a cache
     // replacement cannot produce mixed-generation picker rows.
     let codex_roster = codex_model_cache::model_roster();
@@ -803,6 +804,7 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
         config,
         &codex_roster,
         &app.provider_health,
+        &auto_hint,
     );
 
     for provider in ApiProvider::sorted_for_display() {
@@ -838,6 +840,7 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
             config,
             &codex_roster,
             &app.provider_health,
+            &auto_hint,
         );
     }
 
@@ -852,6 +855,7 @@ fn push_provider_model_rows(
     config: &Config,
     codex_roster: &CodexModelRoster,
     provider_health: &crate::provider_readiness::ProviderReadinessSnapshot,
+    auto_hint: &str,
 ) {
     for id in model_ids {
         let readiness =
@@ -860,11 +864,7 @@ fn push_provider_model_rows(
         let readiness_label = readiness.label();
         if id == "auto" {
             let metadata = effective_picker_metadata(config, None, "auto");
-            let hint = format!(
-                "{} · {}",
-                readiness_label,
-                render_picker_model_hint("auto", None, &metadata, None)
-            );
+            let hint = format!("{} · {}", readiness_label, auto_hint);
             push_model_row(rows, id, None, hint, metadata, selectable);
         } else {
             let roster_entry = if provider == ApiProvider::OpenaiCodex {
@@ -889,6 +889,28 @@ fn push_provider_model_rows(
             push_model_row(rows, id.clone(), Some(provider), hint, metadata, selectable);
         }
     }
+}
+
+fn auto_picker_hint(app: &App, config: &Config) -> String {
+    let inventory = crate::model_inventory::ModelInventory::from_config(config);
+    let hint_id = if inventory.router_available {
+        MessageId::ModelPickerAutoNetworkHint
+    } else {
+        MessageId::ModelPickerAutoLocalHint
+    };
+    let mut hint = app.tr(hint_id).into_owned();
+    if let (Some(provider), Some(model)) = (
+        app.last_effective_provider,
+        app.last_effective_model.as_deref(),
+    ) {
+        let last = app
+            .tr(MessageId::ModelPickerAutoLastRoute)
+            .replace("{provider}", provider.display_name())
+            .replace("{model}", model);
+        hint.push_str(" · ");
+        hint.push_str(&last);
+    }
+    hint
 }
 
 fn push_configured_provider_model(
@@ -1360,9 +1382,7 @@ fn render_picker_model_hint(
     metadata: &EffectivePickerMetadata,
     codex_freshness: Option<CodexModelCacheFreshness>,
 ) -> String {
-    if id == "auto" {
-        return "select per turn".to_string();
-    }
+    debug_assert_ne!(id, "auto", "Auto rows use the context-aware picker hint");
 
     let mut parts = Vec::new();
 
@@ -1938,6 +1958,33 @@ mod tests {
                 || priced_hint.contains("$"),
             "hint should include pricing for a priced row: {priced_hint}"
         );
+    }
+
+    #[test]
+    fn auto_picker_hint_discloses_scope_data_path_and_last_route() {
+        let (mut app, config, _lock) = create_test_app();
+        app.ui_locale = Locale::En;
+        app.last_effective_provider = Some(ApiProvider::Zai);
+        app.last_effective_model = Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string());
+
+        let local = auto_picker_hint(&app, &config);
+        assert!(local.contains("local heuristic"), "{local}");
+        assert!(local.contains("no router request"), "{local}");
+        assert!(
+            local.contains("last Zhipu AI / Z.ai · GLM-5-Turbo"),
+            "{local}"
+        );
+
+        let _deepseek =
+            crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "test-router-key");
+        let network = auto_picker_hint(&app, &config);
+        assert!(network.contains("runnable providers"), "{network}");
+        assert!(network.contains("request + recent context"), "{network}");
+        assert!(
+            network.contains("DeepSeek / deepseek-v4-flash"),
+            "{network}"
+        );
+        assert!(!network.contains("test-router-key"), "{network}");
     }
 
     #[test]

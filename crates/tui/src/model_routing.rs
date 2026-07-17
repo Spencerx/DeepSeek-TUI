@@ -255,7 +255,7 @@ impl AutoRouteSource {
     #[must_use]
     pub(crate) fn label(self) -> &'static str {
         match self {
-            AutoRouteSource::FlashRouter => "flash-router",
+            AutoRouteSource::FlashRouter => "classifier",
             AutoRouteSource::Heuristic => "heuristic",
         }
     }
