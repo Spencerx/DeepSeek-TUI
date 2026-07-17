@@ -292,9 +292,19 @@ pub fn repair_json_text_once(raw: &str) -> String {
         .and_then(|value| value.strip_suffix("```"))
         .map(str::trim)
         .unwrap_or(trimmed);
-    let object = slice_json_payload(without_fence, '{', '}');
-    let array = slice_json_payload(without_fence, '[', ']');
-    object.or(array).unwrap_or(without_fence).to_string()
+
+    let obj_start = without_fence.find('{');
+    let arr_start = without_fence.find('[');
+
+    match (obj_start, arr_start) {
+        (Some(o), Some(a)) if o < a => slice_json_payload(without_fence, '{', '}'),
+        (Some(_), Some(_)) => slice_json_payload(without_fence, '[', ']'),
+        (Some(_), None) => slice_json_payload(without_fence, '{', '}'),
+        (None, Some(_)) => slice_json_payload(without_fence, '[', ']'),
+        (None, None) => None,
+    }
+    .unwrap_or(without_fence)
+    .to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -491,5 +501,74 @@ mod tests {
         assert_eq!(provider.provider(), "mock");
         assert_eq!(provider.model(), "fast");
         assert_eq!(response.text, "mock response");
+    }
+
+    #[test]
+    fn test_repair_json_text_once() {
+        // Plain JSON object
+        assert_eq!(repair_json_text_once(r#"{"key": "value"}"#), r#"{"key": "value"}"#);
+
+        // Plain JSON array
+        assert_eq!(repair_json_text_once(r#"[1, 2, 3]"#), r#"[1, 2, 3]"#);
+
+        // Markdown fenced JSON object
+        assert_eq!(
+            repair_json_text_once("```json\n{\"key\": \"value\"}\n```"),
+            r#"{"key": "value"}"#
+        );
+
+        // Markdown fenced JSON array
+        assert_eq!(
+            repair_json_text_once("```json\n[1, 2, 3]\n```"),
+            r#"[1, 2, 3]"#
+        );
+
+        // Generic markdown fence
+        assert_eq!(
+            repair_json_text_once("```\n{\"key\": \"value\"}\n```"),
+            r#"{"key": "value"}"#
+        );
+
+        // JSON object embedded in text
+        assert_eq!(
+            repair_json_text_once("Here is the JSON:\n\n{\"key\": \"value\"}\n\nHope this helps!"),
+            r#"{"key": "value"}"#
+        );
+
+        // JSON array embedded in text
+        assert_eq!(
+            repair_json_text_once("Some text before [1, 2, 3] and some text after"),
+            r#"[1, 2, 3]"#
+        );
+
+        // Nested structures (object containing array)
+        assert_eq!(
+            repair_json_text_once(r#"{"key": [1, 2, 3]}"#),
+            r#"{"key": [1, 2, 3]}"#
+        );
+
+        // Nested structures (array containing object)
+        assert_eq!(
+            repair_json_text_once(r#"[{"key": "value"}]"#),
+            r#"[{"key": "value"}]"#
+        );
+
+        // Fenced JSON embedded in text (strips fence first, then slices if needed)
+        assert_eq!(
+            repair_json_text_once("Here is the JSON:\n```json\n{\"key\": \"value\"}\n```\nDone."),
+            r#"{"key": "value"}"#
+        );
+
+        // No valid JSON, fallback to trimmed text
+        assert_eq!(
+            repair_json_text_once("Just some plain text without json"),
+            "Just some plain text without json"
+        );
+
+        // Fenced plain text, falls back to stripped and trimmed text
+        assert_eq!(
+            repair_json_text_once("```json\nJust some plain text\n```"),
+            "Just some plain text"
+        );
     }
 }
