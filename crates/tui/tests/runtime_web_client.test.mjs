@@ -45,6 +45,59 @@ function runtimeEvent(sequence, event, payload = {}, overrides = {}) {
   };
 }
 
+function cssDeclarations(styles, selectorPattern) {
+  const match = styles.match(new RegExp(`${selectorPattern}\\s*\\{([^}]*)\\}`));
+  assert.ok(match, `missing CSS rule matching ${selectorPattern}`);
+  return match[1];
+}
+
+test("embedded web client uses the Blue Stage semantic palette", async () => {
+  const [styles, html] = await Promise.all([
+    readFile(new URL("../src/runtime_web/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime_web/index.html", import.meta.url), "utf8"),
+  ]);
+
+  for (const token of [
+    "--ink-0: #03070d",
+    "--ink-1: #08111c",
+    "--ink-2: #0e1729",
+    "--text: #f6f2e8",
+    "--action: #6aaef2",
+    "--human: #f6c453",
+    "--live: #4fd1c5",
+    "--warning: #ff7a59",
+    "--danger: #ff86b2",
+    "--ok: #9bd66f",
+  ]) {
+    assert.match(styles, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.match(
+    cssDeclarations(styles, "\\.primary-button,\\s*\\.send-button"),
+    /background: var\(--action\)/,
+  );
+  assert.match(
+    cssDeclarations(styles, "\\.status-pip\\.running"),
+    /background: var\(--live\)/,
+  );
+  assert.match(
+    cssDeclarations(styles, "\\.message\\.user \\.message-body"),
+    /background: rgba\(246, 196, 83/,
+  );
+  assert.match(
+    cssDeclarations(styles, "\\.attention-card"),
+    /border: 1px solid rgba\(246, 196, 83/,
+  );
+  assert.match(
+    cssDeclarations(styles, "\\.status-banner"),
+    /color: var\(--warning\)/,
+  );
+  assert.match(
+    cssDeclarations(styles, "\\.connection-dot\\.ready"),
+    /background: var\(--ok\)/,
+  );
+  assert.match(html, /name="theme-color" content="#03070d"/);
+});
+
 test("loads a consistent snapshot before subscribing from latest_seq", async () => {
   const state = createThreadState("thread-a");
   const order = [];
