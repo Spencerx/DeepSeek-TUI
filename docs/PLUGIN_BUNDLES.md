@@ -117,6 +117,14 @@ enable example` again. Trust and enablement are separate:
   session after a lifecycle change so the model prompt and MCP pool are both
   rebuilt from the same snapshot.
 
+The review distinguishes remote MCP endpoints from local stdio MCP servers.
+A local stdio server is a child process running with the Codewhale user's host
+filesystem and network authority; plugin trust is not an OS sandbox. The
+review therefore shows the command, argument count, working directory,
+environment-variable names, and this host-authority warning without printing
+environment or header values. MCP tool approval still applies after the
+server starts.
+
 Trust receipts live in `~/.codewhale/plugins/state.json`. Atomic owner-only
 writes record the full content hash, capability hash, reviewed capability
 inventory, and review time, with the latest 32 reviews retained as a bounded

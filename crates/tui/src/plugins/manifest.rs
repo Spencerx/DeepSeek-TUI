@@ -152,6 +152,15 @@ impl ResolvedPluginComponents {
 pub struct PluginInventory {
     pub skills: usize,
     pub mcp_servers: usize,
+    /// MCP servers that launch a child process under the Codewhale user's
+    /// host permissions. Kept separate from remote MCP so the review screen
+    /// cannot imply that an empty declared filesystem/network list is a
+    /// sandbox boundary.
+    #[serde(default)]
+    pub stdio_mcp_servers: usize,
+    /// MCP servers contacted over HTTP(S) without launching a local child.
+    #[serde(default)]
+    pub remote_mcp_servers: usize,
     pub commands: usize,
     pub agents: usize,
     pub hooks: usize,
@@ -198,9 +207,11 @@ impl PluginInventory {
     #[must_use]
     pub fn summary(&self) -> String {
         format!(
-            "skills={} mcp={} commands={} agents={} hooks={} lsp={} native={}",
+            "skills={} mcp={} (stdio={} remote={}) commands={} agents={} hooks={} lsp={} native={}",
             self.skills,
             self.mcp_servers,
+            self.stdio_mcp_servers,
+            self.remote_mcp_servers,
             self.commands,
             self.agents,
             self.hooks,
@@ -447,6 +458,18 @@ impl PluginManifest {
     }
 
     fn inventory(&self, components: &ResolvedPluginComponents) -> Result<PluginInventory, String> {
+        let stdio_mcp_servers = self.mcp_servers.as_ref().map_or(0, |servers| {
+            servers
+                .values()
+                .filter(|server| server.command.is_some() && server.url.is_none())
+                .count()
+        });
+        let remote_mcp_servers = self.mcp_servers.as_ref().map_or(0, |servers| {
+            servers
+                .values()
+                .filter(|server| server.url.is_some() && server.command.is_none())
+                .count()
+        });
         let mut network_hosts = self
             .capabilities
             .network_hosts
@@ -473,6 +496,8 @@ impl PluginManifest {
         Ok(PluginInventory {
             skills: components.skills.len(),
             mcp_servers: self.mcp_servers.as_ref().map_or(0, HashMap::len),
+            stdio_mcp_servers,
+            remote_mcp_servers,
             commands: components.commands.len(),
             agents: components.agents.len(),
             hooks: components.hooks.len(),
@@ -837,6 +862,8 @@ fn hash_inventory(inventory: &PluginInventory) -> String {
     let mut normalized = BTreeMap::new();
     normalized.insert("skills", inventory.skills.to_string());
     normalized.insert("mcp", inventory.mcp_servers.to_string());
+    normalized.insert("mcp-stdio", inventory.stdio_mcp_servers.to_string());
+    normalized.insert("mcp-remote", inventory.remote_mcp_servers.to_string());
     normalized.insert("commands", inventory.commands.to_string());
     normalized.insert("agents", inventory.agents.to_string());
     normalized.insert("hooks", inventory.hooks.to_string());

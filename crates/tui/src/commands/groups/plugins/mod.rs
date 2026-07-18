@@ -317,8 +317,16 @@ fn render_permissions(plugin: &LoadedPlugin) -> String {
     } else {
         plugin.inventory.network_hosts.join(", ")
     };
+    let stdio_authority = if plugin.inventory.stdio_mcp_servers == 0 {
+        "none".to_string()
+    } else {
+        format!(
+            "{} local child process(es) with host-user filesystem/network authority; MCP tool approvals still apply",
+            plugin.inventory.stdio_mcp_servers
+        )
+    };
     format!(
-        "filesystem_roots=[{filesystem}] network_hosts=[{network}] lifecycle_mutation={}",
+        "filesystem_roots=[{filesystem}] network_hosts=[{network}] lifecycle_mutation={} stdio_runtime=[{stdio_authority}]",
         plugin.inventory.lifecycle_mutation
     )
 }
@@ -338,16 +346,39 @@ fn render_mcp_inventory(plugin: &LoadedPlugin) -> String {
                 "configured-off"
             };
             if let Some(command) = server.command.as_deref() {
+                let mut env_keys = server.env.keys().map(String::as_str).collect::<Vec<_>>();
+                env_keys.sort_unstable();
+                let cwd = server
+                    .cwd
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "plugin-root".to_string());
                 format!(
-                    "{name}: stdio command={command} args={} {enabled}",
-                    server.args.len()
+                    "{name}: stdio command={command} args={} cwd={cwd} env_keys=[{}] host-user-authority {enabled}",
+                    server.args.len(),
+                    env_keys.join(", ")
                 )
             } else if let Some(url) = server.url.as_deref() {
                 let endpoint = reqwest::Url::parse(url)
                     .ok()
                     .map(|url| url.origin().ascii_serialization())
                     .unwrap_or_else(|| "invalid-url".to_string());
-                format!("{name}: remote endpoint={endpoint} {enabled}")
+                let mut literal_header_keys =
+                    server.headers.keys().map(String::as_str).collect::<Vec<_>>();
+                literal_header_keys.sort_unstable();
+                let mut env_header_keys = server
+                    .env_headers
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                env_header_keys.sort_unstable();
+                let bearer = server.bearer_token_env_var.as_deref().unwrap_or("none");
+                format!(
+                    "{name}: remote endpoint={endpoint} literal_header_keys=[{}] env_header_keys=[{}] bearer_env={bearer} oauth_scopes={} {enabled}",
+                    literal_header_keys.join(", "),
+                    env_header_keys.join(", "),
+                    server.scopes.len()
+                )
             } else {
                 format!("{name}: invalid")
             }
@@ -589,6 +620,38 @@ mod tests {
         .unwrap();
     }
 
+    fn write_mcp_review_bundle(root: &Path) {
+        let bundle = root.join(".codewhale/plugins/review-mcp");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(
+            bundle.join("plugin.toml"),
+            r#"schema_version = 1
+[plugin]
+name = "review-mcp"
+version = "1.0.0"
+
+[mcp_servers.local]
+command = "node"
+args = ["server.js", "--token", "must-not-be-rendered-from-args"]
+
+[mcp_servers.local.env]
+PLUGIN_TOKEN = "must-not-be-rendered-from-env"
+
+[mcp_servers.remote]
+url = "https://example.invalid/mcp"
+bearer_token_env_var = "REMOTE_TOKEN"
+scopes = ["tools.read"]
+
+[mcp_servers.remote.headers]
+Authorization = "must-not-be-rendered-from-headers"
+
+[mcp_servers.remote.env_headers]
+X_Api_Key = "REMOTE_API_KEY"
+"#,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn list_show_validate_are_read_only_and_label_legacy_tools() {
         let _lock = crate::test_support::lock_test_env();
@@ -658,6 +721,28 @@ mod tests {
         assert!(crate::plugins::try_with_registry(|r| r.is_active("demo")).unwrap());
         assert!(!plugins(&mut app, Some("disable demo")).is_error);
         assert!(!crate::plugins::try_with_registry(|r| r.is_active("demo")).unwrap());
+    }
+
+    #[test]
+    fn mcp_review_discloses_host_authority_and_names_without_secret_values() {
+        let _lock = crate::test_support::lock_test_env();
+        let root = TempDir::new().unwrap();
+        let _home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+        write_mcp_review_bundle(root.path());
+        let (mut app, _temp) = create_test_app(root.path());
+        crate::plugins::init_registry(root.path());
+
+        let review = plugins(&mut app, Some("trust review-mcp"))
+            .message
+            .expect("review output");
+        assert!(review.contains("mcp=2 (stdio=1 remote=1)"));
+        assert!(review.contains("host-user filesystem/network authority"));
+        assert!(review.contains("env_keys=[PLUGIN_TOKEN]"));
+        assert!(review.contains("literal_header_keys=[Authorization]"));
+        assert!(review.contains("env_header_keys=[X_Api_Key]"));
+        assert!(review.contains("bearer_env=REMOTE_TOKEN"));
+        assert!(!review.contains("must-not-be-rendered"));
     }
 
     #[test]
