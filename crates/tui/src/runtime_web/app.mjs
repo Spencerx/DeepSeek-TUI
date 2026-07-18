@@ -1,6 +1,7 @@
-const STREAM_EVENT_NAMES = [
-  "thread.created",
+export const STREAM_EVENT_NAMES = [
+  "thread.started",
   "thread.updated",
+  "thread.forked",
   "turn.started",
   "turn.lifecycle",
   "turn.steered",
@@ -10,6 +11,7 @@ const STREAM_EVENT_NAMES = [
   "item.delta",
   "item.completed",
   "item.failed",
+  "item.interrupted",
   "approval.required",
   "approval.decided",
   "approval.timeout",
@@ -21,6 +23,7 @@ const STREAM_EVENT_NAMES = [
   "agent.progress",
   "agent.completed",
   "agent.list",
+  "tool_call.requested",
 ];
 
 export function createThreadState(threadId = "") {
@@ -83,7 +86,10 @@ export function applyRuntimeEvent(state, envelope) {
     ? envelope.payload
     : {};
 
-  if (eventName === "thread.updated" && payload.thread) {
+  if (
+    (eventName === "thread.started" || eventName === "thread.updated" || eventName === "thread.forked")
+    && payload.thread
+  ) {
     state.thread = payload.thread;
   } else if (eventName === "turn.started" || eventName === "turn.completed") {
     if (payload.turn) upsertTurn(state, payload.turn);
@@ -97,7 +103,12 @@ export function applyRuntimeEvent(state, envelope) {
     const turnId = envelope.turn_id;
     const turn = turnId ? state.turns.get(turnId) : null;
     if (turn) state.turns.set(turnId, { ...turn, status: "in_progress" });
-  } else if (eventName === "item.started" || eventName === "item.completed" || eventName === "item.failed") {
+  } else if (
+    eventName === "item.started"
+    || eventName === "item.completed"
+    || eventName === "item.failed"
+    || eventName === "item.interrupted"
+  ) {
     if (payload.item) upsertItem(state, payload.item);
   } else if (eventName === "item.delta") {
     appendItemDelta(state, envelope.item_id, payload);

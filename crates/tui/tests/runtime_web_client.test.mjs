@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 import {
+  STREAM_EVENT_NAMES,
   applyRuntimeEvent,
   applySnapshot,
   createThreadState,
@@ -190,6 +191,32 @@ test("uses the stream predecessor cursor to detect real gaps without assuming gl
   assert.equal(state.approvals.has("approval-missed"), false);
 });
 
+test("registers the full emitted Runtime vocabulary and advances continuity for every event", async () => {
+  const runtimeSource = await readFile(
+    new URL("../src/runtime_threads.rs", import.meta.url),
+    "utf8",
+  );
+  const emittedNames = new Set(
+    [...runtimeSource.matchAll(
+      /"((?:thread|turn|item|approval|user_input|sandbox|agent|tool_call)\.[a-z_]+)"/g,
+    )].map((match) => match[1]),
+  );
+  assert.deepEqual(new Set(STREAM_EVENT_NAMES), emittedNames);
+  assert.equal(STREAM_EVENT_NAMES.includes("thread.created"), false);
+
+  const state = createThreadState("thread-a");
+  applySnapshot(state, snapshot("thread-a", 7));
+  let previousSeq = 7;
+  for (const eventName of STREAM_EVENT_NAMES) {
+    const sequence = previousSeq + 2;
+    const envelope = runtimeEvent(sequence, eventName, {}, { previous_seq: previousSeq });
+    assert.equal(runtimeEventContinuity(state, envelope), "next", eventName);
+    assert.equal(applyRuntimeEvent(state, envelope), true, eventName);
+    assert.equal(state.latestSeq, sequence, eventName);
+    previousSeq = sequence;
+  }
+});
+
 test("gap recovery snapshot restores approval and user-input attention before resubscribing", async () => {
   const state = createThreadState("thread-a");
   applySnapshot(state, snapshot("thread-a", 7));
@@ -265,6 +292,31 @@ test("assembles deltas and replaces the live item with its settled receipt", () 
   );
   assert.equal(state.items.get("item-new").status, "completed");
   assert.deepEqual(state.itemOrder, ["item-new"]);
+
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(5, "item.delta", { delta: "partial", kind: "tool_call" }, { item_id: "item-stop" }),
+  );
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(
+      6,
+      "item.interrupted",
+      {
+        item: {
+          id: "item-stop",
+          turn_id: "turn-1",
+          kind: "tool_call",
+          status: "interrupted",
+          summary: "Interrupted",
+          detail: "partial",
+        },
+      },
+      { item_id: "item-stop" },
+    ),
+  );
+  assert.equal(state.items.get("item-stop").status, "interrupted");
+  assert.deepEqual(state.itemOrder, ["item-new", "item-stop"]);
 });
 
 test("tracks approval and user-input attention until each is resolved", () => {

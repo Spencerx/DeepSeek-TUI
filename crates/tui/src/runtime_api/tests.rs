@@ -618,6 +618,7 @@ struct TestServerOverrides {
     config_path: Option<PathBuf>,
     config_profile: Option<String>,
     web: Option<web::RuntimeWebState>,
+    compat_stream_test_hook: Option<mpsc::UnboundedSender<CompatStreamTestPoint>>,
 }
 
 async fn spawn_test_server_with_root_token_mobile_workspace_and_subagents(
@@ -734,6 +735,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         fleet_codewhale_binary: overrides
             .fleet_codewhale_binary
             .unwrap_or_else(configured_codewhale_binary),
+        compat_stream_test_hook: overrides.compat_stream_test_hook,
     };
     let app = build_router(state);
     let handle = tokio::spawn(async move {
@@ -1967,6 +1969,212 @@ async fn stream_requires_prompt() -> Result<()> {
         .send()
         .await?;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("server");
+    let sessions_dir = root.join("sessions");
+    let workspace = root.join("workspace");
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+            root,
+            sessions_dir,
+            None,
+            false,
+            workspace,
+            TestServerOverrides {
+                compat_stream_test_hook: Some(hook_tx),
+                ..TestServerOverrides::default()
+            },
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+
+    let client = crate::tls::reqwest_client();
+    let stream_client = client.clone();
+    let stream_task = tokio::spawn(async move {
+        let response = stream_client
+            .post(format!("http://{addr}/v1/stream"))
+            .json(&json!({ "prompt": "cross the replay handoff" }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = response.text().await?;
+        Ok::<_, anyhow::Error>((content_type, body))
+    });
+
+    let created = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+        .await
+        .context("compatibility stream did not create its thread")?
+        .context("compatibility stream test hook closed")?;
+    let (thread_id, resume_created) = match created {
+        CompatStreamTestPoint::ThreadCreated { thread_id, resume } => (thread_id, resume),
+        CompatStreamTestPoint::SubscribedBeforeReplay { .. }
+        | CompatStreamTestPoint::ReplayLoaded { .. } => {
+            bail!("compatibility stream loaded replay before its thread was prepared")
+        }
+    };
+
+    let harness = crate::core::engine::mock_engine_handle();
+    runtime_threads
+        .install_test_engine(&thread_id, harness.handle.clone())
+        .await?;
+    let mut rx_op = harness.rx_op;
+    let tx_event = harness.tx_event;
+    let (release_overlap, wait_for_overlap_release) = oneshot::channel();
+    let (release_terminal, wait_for_terminal_release) = oneshot::channel();
+    let engine_task = tokio::spawn(async move {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+            return;
+        }
+        let _ = wait_for_overlap_release.await;
+        let _ = tx_event
+            .send(EngineEvent::TurnStarted {
+                turn_id: "mock_compat_handoff".to_string(),
+                created_at: chrono::Utc::now(),
+                route: None,
+            })
+            .await;
+        let _ = tx_event
+            .send(EngineEvent::MessageStarted { index: 0 })
+            .await;
+        let _ = tx_event
+            .send(EngineEvent::MessageDelta {
+                index: 0,
+                content: "handoff".to_string(),
+            })
+            .await;
+        let _ = wait_for_terminal_release.await;
+        let _ = tx_event
+            .send(EngineEvent::MessageComplete { index: 0 })
+            .await;
+        let _ = tx_event
+            .send(EngineEvent::TurnComplete {
+                usage: Usage {
+                    input_tokens: 3,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
+                status: TurnOutcomeStatus::Completed,
+                error: None,
+                tool_catalog: None,
+                base_url: None,
+            })
+            .await;
+    });
+    resume_created
+        .send(())
+        .map_err(|_| anyhow::anyhow!("compatibility stream dropped thread-create handoff"))?;
+
+    let subscribed = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+        .await
+        .context("compatibility stream did not subscribe before replay")?
+        .context("compatibility stream test hook closed")?;
+    let (subscribed_thread_id, subscribed_turn_id, resume_subscribed) = match subscribed {
+        CompatStreamTestPoint::SubscribedBeforeReplay {
+            thread_id,
+            turn_id,
+            resume,
+        } => (thread_id, turn_id, resume),
+        CompatStreamTestPoint::ThreadCreated { .. }
+        | CompatStreamTestPoint::ReplayLoaded { .. } => {
+            bail!("compatibility stream did not expose its subscribe-before-replay boundary")
+        }
+    };
+    assert_eq!(subscribed_thread_id, thread_id);
+
+    release_overlap
+        .send(())
+        .map_err(|_| anyhow::anyhow!("mock engine dropped overlap release"))?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if runtime_threads
+                .events_since(&thread_id, None)
+                .is_ok_and(|events| {
+                    events.iter().any(|event| {
+                        event.turn_id.as_deref() == Some(&subscribed_turn_id)
+                            && event.event == "item.delta"
+                    })
+                })
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("overlap event was not persisted before compatibility replay")?;
+    resume_subscribed
+        .send(())
+        .map_err(|_| anyhow::anyhow!("compatibility stream dropped subscribe handoff"))?;
+
+    let replay_loaded = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+        .await
+        .context("compatibility stream did not reach its replay/live handoff")?
+        .context("compatibility stream test hook closed")?;
+    let (replay_thread_id, turn_id, resume_replay) = match replay_loaded {
+        CompatStreamTestPoint::ReplayLoaded {
+            thread_id,
+            turn_id,
+            resume,
+        } => (thread_id, turn_id, resume),
+        CompatStreamTestPoint::ThreadCreated { .. }
+        | CompatStreamTestPoint::SubscribedBeforeReplay { .. } => {
+            bail!("compatibility stream created more than one thread")
+        }
+    };
+    assert_eq!(replay_thread_id, thread_id);
+    assert_eq!(turn_id, subscribed_turn_id);
+
+    release_terminal
+        .send(())
+        .map_err(|_| anyhow::anyhow!("mock engine dropped terminal release"))?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if runtime_threads
+                .events_since(&thread_id, None)
+                .is_ok_and(|events| {
+                    events.iter().any(|event| {
+                        event.turn_id.as_deref() == Some(&turn_id)
+                            && event.event == "turn.completed"
+                    })
+                })
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("terminal event was not persisted during compatibility handoff")?;
+    resume_replay
+        .send(())
+        .map_err(|_| anyhow::anyhow!("compatibility stream dropped replay handoff"))?;
+
+    let (content_type, body) = tokio::time::timeout(Duration::from_secs(3), stream_task)
+        .await
+        .context("compatibility stream hung after its terminal event")?
+        .context("compatibility stream request task panicked")??;
+    engine_task.await.context("mock engine task panicked")?;
+
+    assert!(content_type.starts_with("text/event-stream"));
+    assert_eq!(body.matches("event: message.delta").count(), 1, "{body}");
+    assert_eq!(body.matches("event: turn.completed").count(), 1, "{body}");
+    assert_eq!(body.matches("event: done").count(), 1, "{body}");
+
     handle.abort();
     Ok(())
 }

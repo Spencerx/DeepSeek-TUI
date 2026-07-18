@@ -122,6 +122,26 @@ pub struct RuntimeApiState {
     /// lazily-initialized slot; slow per-pool work (connect_all) runs under
     /// the inner handle so it cannot block slot reads.
     mcp_pool: Arc<Mutex<Option<Arc<Mutex<McpPool>>>>>,
+    #[cfg(test)]
+    compat_stream_test_hook: Option<tokio::sync::mpsc::UnboundedSender<CompatStreamTestPoint>>,
+}
+
+#[cfg(test)]
+enum CompatStreamTestPoint {
+    ThreadCreated {
+        thread_id: String,
+        resume: tokio::sync::oneshot::Sender<()>,
+    },
+    SubscribedBeforeReplay {
+        thread_id: String,
+        turn_id: String,
+        resume: tokio::sync::oneshot::Sender<()>,
+    },
+    ReplayLoaded {
+        thread_id: String,
+        turn_id: String,
+        resume: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -508,6 +528,8 @@ pub async fn run_http_server(
         web,
         fleet_codewhale_binary: configured_codewhale_binary(),
         mcp_pool: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        compat_stream_test_hook: None,
     };
     let app = build_router(state);
 
@@ -2243,6 +2265,19 @@ async fn stream_turn(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to create stream thread: {e}")))?;
 
+    #[cfg(test)]
+    if let Some(hook) = &state.compat_stream_test_hook {
+        let (resume, wait_for_resume) = tokio::sync::oneshot::channel();
+        hook.send(CompatStreamTestPoint::ThreadCreated {
+            thread_id: thread.id.clone(),
+            resume,
+        })
+        .map_err(|_| ApiError::internal("Compatibility stream test hook closed"))?;
+        wait_for_resume
+            .await
+            .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
+    }
+
     let turn = state
         .runtime_threads
         .start_turn(
@@ -2261,15 +2296,48 @@ async fn stream_turn(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to start stream turn: {e}")))?;
 
-    let backlog = state
-        .runtime_threads
-        .events_since(&thread.id, None)
-        .map_err(|e| ApiError::internal(format!("Failed to load stream backlog: {e}")))?;
+    // Subscribe before reading the durable replay. Events produced while the
+    // replay is loaded then exist in at least one source, and the sequence
+    // cursor below removes overlap without dropping the handoff edge.
     let mut live = state.runtime_threads.subscribe_events();
     let thread_id = thread.id.clone();
     let turn_id = turn.id.clone();
 
+    #[cfg(test)]
+    if let Some(hook) = &state.compat_stream_test_hook {
+        let (resume, wait_for_resume) = tokio::sync::oneshot::channel();
+        hook.send(CompatStreamTestPoint::SubscribedBeforeReplay {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            resume,
+        })
+        .map_err(|_| ApiError::internal("Compatibility stream test hook closed"))?;
+        wait_for_resume
+            .await
+            .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
+    }
+
+    let backlog = state
+        .runtime_threads
+        .events_since(&thread.id, None)
+        .map_err(|e| ApiError::internal(format!("Failed to load stream backlog: {e}")))?;
+
+    #[cfg(test)]
+    if let Some(hook) = &state.compat_stream_test_hook {
+        let (resume, wait_for_resume) = tokio::sync::oneshot::channel();
+        hook.send(CompatStreamTestPoint::ReplayLoaded {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            resume,
+        })
+        .map_err(|_| ApiError::internal("Compatibility stream test hook closed"))?;
+        wait_for_resume
+            .await
+            .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
+    }
+
     let stream = stream! {
+        let mut last_seq = 0;
         yield Ok(sse_json("turn.started", json!({
             "thread_id": thread.id,
             "turn_id": turn.id,
@@ -2279,42 +2347,112 @@ async fn stream_turn(
         })));
 
         for event in backlog {
-            if event.thread_id != thread_id || event.turn_id.as_deref() != Some(&turn_id) {
+            let Some((mapped, terminal)) = take_compat_turn_event(
+                &event,
+                &thread_id,
+                &turn_id,
+                &mut last_seq,
+            ) else {
                 continue;
-            }
-            if let Some(mapped) = map_compat_stream_event(&event) {
+            };
+            if let Some(mapped) = mapped {
                 yield Ok(mapped);
             }
-            if event.event == "turn.completed" {
+            if terminal {
                 yield Ok(sse_json("done", json!({})));
                 return;
             }
         }
 
         loop {
-            let incoming = live.recv().await;
-            let Ok(event) = incoming else {
-                yield Ok(sse_json("error", json!({ "message": "event channel closed" })));
-                break;
-            };
-            if event.thread_id != thread_id || event.turn_id.as_deref() != Some(&turn_id) {
-                continue;
-            }
-            if let Some(mapped) = map_compat_stream_event(&event) {
-                yield Ok(mapped);
-            }
-            if event.event == "turn.completed" {
-                break;
+            match live.recv().await {
+                Ok(event) => {
+                    let Some((mapped, terminal)) = take_compat_turn_event(
+                        &event,
+                        &thread_id,
+                        &turn_id,
+                        &mut last_seq,
+                    ) else {
+                        continue;
+                    };
+                    if let Some(mapped) = mapped {
+                        yield Ok(mapped);
+                    }
+                    if terminal {
+                        yield Ok(sse_json("done", json!({})));
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    let recovered = match state.runtime_threads.events_since(
+                        &thread_id,
+                        Some(last_seq),
+                    ) {
+                        Ok(events) => events,
+                        Err(error) => {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                turn_id = %turn_id,
+                                last_seq,
+                                skipped,
+                                %error,
+                                "Failed to recover lagged compatibility stream from durable history"
+                            );
+                            yield Ok(sse_json("error", json!({
+                                "message": "failed to recover lagged event stream",
+                            })));
+                            return;
+                        }
+                    };
+                    for event in recovered {
+                        let Some((mapped, terminal)) = take_compat_turn_event(
+                            &event,
+                            &thread_id,
+                            &turn_id,
+                            &mut last_seq,
+                        ) else {
+                            continue;
+                        };
+                        if let Some(mapped) = mapped {
+                            yield Ok(mapped);
+                        }
+                        if terminal {
+                            yield Ok(sse_json("done", json!({})));
+                            return;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    yield Ok(sse_json("error", json!({ "message": "event channel closed" })));
+                    return;
+                }
             }
         }
-
-        yield Ok(sse_json("done", json!({})));
     };
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
+    ))
+}
+
+fn take_compat_turn_event(
+    event: &crate::runtime_threads::RuntimeEventRecord,
+    thread_id: &str,
+    turn_id: &str,
+    last_seq: &mut u64,
+) -> Option<(Option<SseEvent>, bool)> {
+    if event.thread_id != thread_id
+        || event.turn_id.as_deref() != Some(turn_id)
+        || event.seq <= *last_seq
+    {
+        return None;
+    }
+    *last_seq = event.seq;
+    Some((
+        map_compat_stream_event(event),
+        event.event == "turn.completed",
     ))
 }
 
