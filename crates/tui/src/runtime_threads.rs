@@ -1591,6 +1591,18 @@ impl RuntimeThreadManager {
         Ok(record)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn emit_event_for_test(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+        event: &str,
+        payload: Value,
+    ) -> Result<RuntimeEventRecord> {
+        self.emit_event(thread_id, turn_id, None, event, payload)
+            .await
+    }
+
     pub async fn create_thread(&self, req: CreateThreadRequest) -> Result<ThreadRecord> {
         let now = Utc::now();
         let (model_provider, model_provider_id, default_model) = {

@@ -2097,49 +2097,107 @@ async fn stream_thread_events(
         .await
         .map_err(map_thread_err)?;
 
+    // Subscribe before reading durable history. An event emitted while replay
+    // is loaded is then present in both places (and deduped below) or queued
+    // live, never in an uncovered handoff window.
+    let live = state.runtime_threads.subscribe_events();
     let mut backlog = state
         .runtime_threads
         .events_since(&id, query.since_seq)
         .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut replay_cursor = query.since_seq.unwrap_or(0);
     if let Some(limit) = query.replay_limit
         && backlog.len() > limit
     {
-        backlog = backlog.split_off(backlog.len() - limit);
-    }
-    let mut last_seq = query.since_seq.unwrap_or(0);
-    if let Some(last) = backlog.last() {
-        last_seq = last.seq;
+        let split_at = backlog.len() - limit;
+        replay_cursor = backlog[split_at - 1].seq;
+        backlog = backlog.split_off(split_at);
     }
 
-    let mut live = state.runtime_threads.subscribe_events();
-    let thread_id = id.clone();
-    let stream = stream! {
-        for event in backlog {
-            let event_name = event.event.clone();
-            yield Ok(sse_json(&event_name, runtime_event_payload(event)));
-        }
-        loop {
-            let incoming = live.recv().await;
-            let Ok(event) = incoming else {
-                break;
-            };
-            if event.thread_id != thread_id {
-                continue;
-            }
-            if event.seq <= last_seq {
-                continue;
-            }
-            last_seq = event.seq;
-            let event_name = event.event.clone();
-            yield Ok(sse_json(&event_name, runtime_event_payload(event)));
-        }
-    };
+    let stream = replay_live_thread_events(
+        state.runtime_threads.clone(),
+        id,
+        replay_cursor,
+        backlog,
+        live,
+    );
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     ))
+}
+
+fn replay_live_thread_events(
+    runtime_threads: SharedRuntimeThreadManager,
+    thread_id: String,
+    mut last_seq: u64,
+    backlog: Vec<crate::runtime_threads::RuntimeEventRecord>,
+    mut live: tokio::sync::broadcast::Receiver<crate::runtime_threads::RuntimeEventRecord>,
+) -> impl futures_util::Stream<Item = Result<SseEvent, Infallible>> {
+    stream! {
+        for event in backlog {
+            if event.thread_id != thread_id || event.seq <= last_seq {
+                continue;
+            }
+            let previous_seq = last_seq;
+            last_seq = event.seq;
+            let event_name = event.event.clone();
+            yield Ok(sse_json(
+                &event_name,
+                runtime_event_payload_with_previous(event, previous_seq),
+            ));
+        }
+
+        loop {
+            match live.recv().await {
+                Ok(event) => {
+                    if event.thread_id != thread_id || event.seq <= last_seq {
+                        continue;
+                    }
+                    let previous_seq = last_seq;
+                    last_seq = event.seq;
+                    let event_name = event.event.clone();
+                    yield Ok(sse_json(
+                        &event_name,
+                        runtime_event_payload_with_previous(event, previous_seq),
+                    ));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // Broadcast is only a wake-up path; durable history remains
+                    // authoritative. Catch up from the last delivered cursor so
+                    // receiver pressure cannot turn into a silent prompt loss.
+                    let recovered = match runtime_threads.events_since(&thread_id, Some(last_seq)) {
+                        Ok(events) => events,
+                        Err(error) => {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                last_seq,
+                                skipped,
+                                %error,
+                                "Failed to recover lagged Runtime web event stream from durable history"
+                            );
+                            break;
+                        }
+                    };
+                    for event in recovered {
+                        if event.thread_id != thread_id || event.seq <= last_seq {
+                            continue;
+                        }
+                        let previous_seq = last_seq;
+                        last_seq = event.seq;
+                        let event_name = event.event.clone();
+                        yield Ok(sse_json(
+                            &event_name,
+                            runtime_event_payload_with_previous(event, previous_seq),
+                        ));
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    }
 }
 
 async fn stream_turn(
@@ -2278,6 +2336,17 @@ fn runtime_event_payload(event: crate::runtime_threads::RuntimeEventRecord) -> s
         extra: Default::default(),
     };
     serde_json::to_value(envelope).expect("serialize runtime event envelope")
+}
+
+fn runtime_event_payload_with_previous(
+    event: crate::runtime_threads::RuntimeEventRecord,
+    previous_seq: u64,
+) -> serde_json::Value {
+    let mut payload = runtime_event_payload(event);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("previous_seq".to_string(), json!(previous_seq));
+    }
+    payload
 }
 
 fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -> Option<SseEvent> {

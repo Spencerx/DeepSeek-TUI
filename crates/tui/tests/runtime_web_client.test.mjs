@@ -8,6 +8,7 @@ import {
   createThreadState,
   eventStreamUrl,
   restoreDraft,
+  runtimeEventContinuity,
   saveDraft,
   setSafeText,
   snapshotThenSubscribe,
@@ -161,6 +162,74 @@ test("reconnect cursor advances monotonically and duplicate or stale-thread even
   assert.equal(state.items.get("item-1").detail, "Hello world");
   assert.equal(state.latestSeq, 8);
   assert.equal(eventStreamUrl("thread-a", state.latestSeq), "/v1/threads/thread-a/events?since_seq=8");
+});
+
+test("uses the stream predecessor cursor to detect real gaps without assuming global sequences are contiguous", () => {
+  const state = createThreadState("thread-a");
+  applySnapshot(state, snapshot("thread-a", 7));
+
+  const interleaved = runtimeEvent(
+    12,
+    "item.delta",
+    { delta: " after other threads", kind: "agent_message" },
+    { item_id: "item-1", previous_seq: 7 },
+  );
+  assert.equal(runtimeEventContinuity(state, interleaved), "next");
+  assert.equal(applyRuntimeEvent(state, interleaved), true);
+  assert.equal(state.latestSeq, 12);
+
+  const gap = runtimeEvent(
+    15,
+    "approval.required",
+    { approval_id: "approval-missed", tool_name: "exec_shell" },
+    { previous_seq: 14 },
+  );
+  assert.equal(runtimeEventContinuity(state, gap), "gap");
+  assert.equal(applyRuntimeEvent(state, gap), false);
+  assert.equal(state.latestSeq, 12);
+  assert.equal(state.approvals.has("approval-missed"), false);
+});
+
+test("gap recovery snapshot restores approval and user-input attention before resubscribing", async () => {
+  const state = createThreadState("thread-a");
+  applySnapshot(state, snapshot("thread-a", 7));
+  const subscriptions = [];
+
+  const recovered = await snapshotThenSubscribe({
+    state,
+    threadId: "thread-a",
+    loadSnapshot: async () => ({
+      ...snapshot("thread-a", 15),
+      pending_approvals: [{
+        id: "approval-recovered",
+        turn_id: "turn-1",
+        tool_name: "exec_command",
+        description: "Run a local check",
+      }],
+      pending_user_inputs: [{
+        id: "input-recovered",
+        turn_id: "turn-1",
+        request: { questions: [{ id: "choice", question: "Continue?", options: [] }] },
+      }],
+    }),
+    subscribe: (threadId, sequence) => subscriptions.push([threadId, sequence]),
+  });
+
+  assert.equal(recovered, true);
+  assert.equal(state.approvals.size, 1);
+  assert.equal(state.approvals.has("approval-recovered"), true);
+  assert.equal(state.userInputs.size, 1);
+  assert.equal(state.userInputs.has("input-recovered"), true);
+  assert.deepEqual(subscriptions, [["thread-a", 15]]);
+
+  const duplicate = runtimeEvent(
+    15,
+    "approval.required",
+    { approval_id: "approval-recovered", tool_name: "exec_command" },
+    { previous_seq: 14 },
+  );
+  assert.equal(applyRuntimeEvent(state, duplicate), false);
+  assert.equal(state.approvals.size, 1);
 });
 
 test("assembles deltas and replaces the live item with its settled receipt", () => {

@@ -72,13 +72,10 @@ export function applySnapshot(state, detail, expectedThreadId = state.threadId) 
 }
 
 export function applyRuntimeEvent(state, envelope) {
-  if (!envelope || envelope.thread_id !== state.threadId) {
+  if (runtimeEventContinuity(state, envelope) !== "next") {
     return false;
   }
   const sequence = normalizedSequence(envelope.seq);
-  if (sequence <= state.latestSeq) {
-    return false;
-  }
   state.latestSeq = sequence;
 
   const eventName = envelope.event || envelope.kind || "";
@@ -118,6 +115,23 @@ export function applyRuntimeEvent(state, envelope) {
     if (inputId) state.userInputs.delete(inputId);
   }
   return true;
+}
+
+export function runtimeEventContinuity(state, envelope) {
+  if (!envelope || envelope.thread_id !== state.threadId) {
+    return "ignore";
+  }
+  const sequence = normalizedSequence(envelope.seq);
+  if (sequence <= state.latestSeq) {
+    return "ignore";
+  }
+  if (Object.hasOwn(envelope, "previous_seq")) {
+    const previousSequence = normalizedSequence(envelope.previous_seq);
+    if (previousSequence !== state.latestSeq) {
+      return "gap";
+    }
+  }
+  return "next";
 }
 
 export async function snapshotThenSubscribe({
@@ -366,9 +380,18 @@ function startBrowserClient() {
     app.stream = stream;
     stream.onopen = () => setConnection("ready", "Local runtime connected");
     const receive = (message) => {
-      if (generation !== app.generation || threadId !== app.selectedThreadId) return;
+      if (
+        app.stream !== stream
+        || generation !== app.generation
+        || threadId !== app.selectedThreadId
+      ) return;
       try {
         const envelope = JSON.parse(message.data);
+        if (runtimeEventContinuity(app.threadState, envelope) === "gap") {
+          showStatus("Runtime event continuity changed; refreshing the thread snapshot…");
+          void recoverProjection(threadId, generation, stream);
+          return;
+        }
         if (!applyRuntimeEvent(app.threadState, envelope)) return;
         renderAll(true);
         if (envelope.event === "turn.completed" || envelope.event === "thread.updated") {
@@ -380,8 +403,12 @@ function startBrowserClient() {
     };
     for (const name of STREAM_EVENT_NAMES) stream.addEventListener(name, receive);
     stream.onerror = () => {
+      if (app.stream !== stream) {
+        stream.close();
+        return;
+      }
       stream.close();
-      if (app.stream === stream) app.stream = null;
+      app.stream = null;
       if (generation !== app.generation || threadId !== app.selectedThreadId) return;
       setConnection("", "Reconnecting to local runtime…");
       app.reconnectTimer = setTimeout(
@@ -389,6 +416,42 @@ function startBrowserClient() {
         900,
       );
     };
+  }
+
+  async function recoverProjection(threadId, generation, sourceStream = null) {
+    if (
+      generation !== app.generation
+      || threadId !== app.selectedThreadId
+      || (sourceStream && app.stream !== sourceStream)
+    ) return;
+
+    if (app.stream) app.stream.close();
+    app.stream = null;
+    if (app.reconnectTimer) clearTimeout(app.reconnectTimer);
+    app.reconnectTimer = null;
+    setConnection("", "Refreshing thread snapshot…");
+
+    try {
+      const subscribed = await snapshotThenSubscribe({
+        state: app.threadState,
+        threadId,
+        loadSnapshot: (id) => api(`/v1/threads/${encodeURIComponent(id)}`),
+        subscribe: (id, sequence) => connectStream(id, sequence, generation),
+        isCurrent: () => generation === app.generation && threadId === app.selectedThreadId,
+      });
+      if (!subscribed) return;
+      renderAll();
+      showStatus("");
+      setConnection("ready", "Local runtime connected");
+    } catch (error) {
+      if (generation !== app.generation || threadId !== app.selectedThreadId) return;
+      showStatus(`Could not refresh the thread snapshot: ${error.message}`);
+      setConnection("error", "Runtime recovery failed");
+      app.reconnectTimer = setTimeout(
+        () => recoverProjection(threadId, generation),
+        900,
+      );
+    }
   }
 
   function renderAll(preserveScroll = false) {

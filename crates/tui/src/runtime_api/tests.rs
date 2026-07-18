@@ -2364,6 +2364,88 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
 }
 
 #[tokio::test]
+async fn event_handoff_replays_and_dedupes_interaction_prompts_without_a_gap() -> Result<()> {
+    let Some((_addr, runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let thread = runtime_threads
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let initial_seq = runtime_threads
+        .events_since(&thread.id, None)?
+        .last()
+        .context("thread creation should emit an event")?
+        .seq;
+
+    // Deterministically place approval.required in the old vulnerable window:
+    // the receiver exists, but durable replay has not been read yet.
+    let live = runtime_threads.subscribe_events();
+    let approval = runtime_threads
+        .emit_event_for_test(
+            &thread.id,
+            None,
+            "approval.required",
+            json!({
+                "approval_id": "approval-handoff",
+                "tool_name": "exec_command",
+                "description": "Run a local check",
+            }),
+        )
+        .await?;
+    let backlog = runtime_threads.events_since(&thread.id, Some(initial_seq))?;
+
+    // This request lands after the replay read and is therefore live-only.
+    let input = runtime_threads
+        .emit_event_for_test(
+            &thread.id,
+            None,
+            "user_input.required",
+            json!({
+                "id": "input-handoff",
+                "request": {
+                    "questions": [{
+                        "id": "choice",
+                        "question": "Continue?",
+                        "options": [],
+                    }],
+                },
+            }),
+        )
+        .await?;
+
+    let stream = replay_live_thread_events(
+        runtime_threads.clone(),
+        thread.id.clone(),
+        initial_seq,
+        backlog,
+        live,
+    )
+    .take(2);
+    let body =
+        axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
+    let rendered = String::from_utf8(body.to_vec())?;
+    let frames = rendered
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|frame| !frame.is_empty())
+        .map(parse_sse_frame)
+        .collect::<Result<Vec<_>>>()?;
+
+    assert_eq!(frames.len(), 2, "unexpected SSE frames: {rendered}");
+    assert_eq!(frames[0].0, "approval.required");
+    assert_eq!(frames[0].1["seq"], approval.seq);
+    assert_eq!(frames[0].1["previous_seq"], initial_seq);
+    assert_eq!(frames[1].0, "user_input.required");
+    assert_eq!(frames[1].1["seq"], input.seq);
+    assert_eq!(frames[1].1["previous_seq"], approval.seq);
+    assert_eq!(rendered.matches("approval-handoff").count(), 1);
+    assert_eq!(rendered.matches("input-handoff").count(), 1);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
     let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());
