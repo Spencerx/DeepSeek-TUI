@@ -1711,6 +1711,91 @@ fn store_load_thread_rejects_newer_schema_version() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[tokio::test]
+async fn store_open_truncates_only_torn_final_event_record_and_preserves_sequence_gap() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let first = store
+        .append_event("thr_torn_tail", None, None, "first", json!({ "value": 1 }))
+        .await
+        .expect("append first event");
+    let torn = store
+        .append_event("thr_torn_tail", None, None, "torn", json!({ "value": 2 }))
+        .await
+        .expect("append event to tear");
+    let path = store.events_path("thr_torn_tail").expect("event path");
+    let original_len = std::fs::metadata(&path).expect("event metadata").len();
+    assert!(original_len > 16);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open event log for simulated crash")
+        .set_len(original_len - 16)
+        .expect("tear final event record");
+    drop(store);
+
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("repair torn event tail");
+    let replay = reopened
+        .events_since("thr_torn_tail", None)
+        .expect("replay repaired event log");
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].seq, first.seq);
+
+    let after_repair = reopened
+        .append_event(
+            "thr_torn_tail",
+            None,
+            None,
+            "after_repair",
+            json!({ "value": 3 }),
+        )
+        .await
+        .expect("append after repair");
+    assert_eq!(after_repair.seq, torn.seq.saturating_add(1));
+    assert_eq!(
+        reopened
+            .events_since("thr_torn_tail", None)
+            .expect("replay repaired and appended events")
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![first.seq, after_repair.seq]
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn store_open_does_not_discard_newline_terminated_malformed_event() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    store
+        .append_event("thr_bad_tail", None, None, "valid", json!({}))
+        .await
+        .expect("append valid event");
+    let path = store.events_path("thr_bad_tail").expect("event path");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open event log");
+    std::io::Write::write_all(&mut file, b"{malformed-but-terminated}\n")
+        .expect("append malformed event");
+    std::io::Write::flush(&mut file).expect("flush malformed event");
+    drop(file);
+    drop(store);
+
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("open terminated event log");
+    let error = reopened
+        .events_since("thr_bad_tail", None)
+        .expect_err("terminated malformed event must fail closed");
+    assert!(
+        format!("{error:#}").contains("Failed to parse event line"),
+        "unexpected replay error: {error:#}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn store_open_rejects_symlinked_state_file() {
@@ -4876,6 +4961,76 @@ async fn restart_recovers_terminal_turn_after_dynamic_receipt_append_failure() -
             })
             .count(),
         1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_reconciles_unresolved_dynamic_call_after_existing_turn_completion() -> Result<()> {
+    let data_dir = test_runtime_dir();
+    let manager = test_manager(data_dir.clone())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let turn_id = "turn_legacy_completed_request";
+    let call_id = "call_legacy_completed_request";
+    let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+    turn.ended_at = Some(Utc::now());
+    turn.duration_ms = Some(1);
+    manager.store.save_turn(&turn)?;
+    let params = DynamicToolCallParams {
+        thread_id: thread.id.clone(),
+        turn_id: turn_id.to_string(),
+        call_id: call_id.to_string(),
+        namespace: Some("legacy".to_string()),
+        tool: "legacy_lookup".to_string(),
+        arguments: json!({ "record": "persisted-before-terminal-receipts" }),
+    };
+    manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(turn_id),
+            "tool_call.requested",
+            json!(&params),
+        )
+        .await?;
+    manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(turn_id),
+            "turn.completed",
+            json!({ "turn": &turn }),
+        )
+        .await?;
+    drop(manager);
+
+    let recovered = test_manager(data_dir)?;
+    recovered.get_thread(&thread.id).await?;
+    let events = recovered.events_since(&thread.id, None)?;
+    let terminal_calls = events
+        .iter()
+        .filter(|event| {
+            event.turn_id.as_deref() == Some(turn_id)
+                && event.payload.get("call_id").and_then(Value::as_str) == Some(call_id)
+                && matches!(
+                    event.event.as_str(),
+                    "tool_call.resolved" | "tool_call.canceled" | "tool_call.timeout"
+                )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_calls.len(), 1);
+    assert_eq!(terminal_calls[0].event, "tool_call.canceled");
+    assert_eq!(terminal_calls[0].payload["reason"], "process_restart");
+    assert_eq!(terminal_calls[0].payload["recovered"], true);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.event == "turn.completed" && event.turn_id.as_deref() == Some(turn_id)
+            })
+            .count(),
+        1,
+        "recovery duplicated an already durable turn completion"
     );
     Ok(())
 }

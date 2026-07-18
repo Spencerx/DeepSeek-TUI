@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -588,6 +588,7 @@ impl RuntimeThreadStore {
         ensure_runtime_store_dir(&turns_dir)?;
         ensure_runtime_store_dir(&items_dir)?;
         ensure_runtime_store_dir(&events_dir)?;
+        repair_torn_event_log_tails(&events_dir)?;
 
         let state_path = root.join("state.json");
         reject_symlinked_store_file(&state_path)?;
@@ -2140,8 +2141,9 @@ impl RuntimeThreadManager {
                 matches!(
                     event.event.as_str(),
                     "tool_call.resolved" | "tool_call.canceled" | "tool_call.timeout"
-                ) && event.payload.get("call_id").and_then(Value::as_str)
-                    == Some(params.call_id.as_str())
+                ) && event.turn_id.as_deref() == Some(params.turn_id.as_str())
+                    && event.payload.get("call_id").and_then(Value::as_str)
+                        == Some(params.call_id.as_str())
             })
         {
             return Ok(false);
@@ -5973,11 +5975,9 @@ impl RuntimeThreadManager {
                     )
                 })
                 .filter_map(|event| {
-                    event
-                        .payload
-                        .get("call_id")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string)
+                    let turn_id = event.turn_id.as_deref()?;
+                    let call_id = event.payload.get("call_id")?.as_str()?;
+                    Some((turn_id.to_string(), call_id.to_string()))
                 })
                 .collect::<HashSet<_>>();
             let mut requests_by_turn: HashMap<String, Vec<DynamicToolCallParams>> = HashMap::new();
@@ -5995,7 +5995,9 @@ impl RuntimeThreadManager {
                     );
                     continue;
                 };
-                if params.thread_id == thread_id && !terminal_calls.contains(&params.call_id) {
+                if params.thread_id == thread_id
+                    && !terminal_calls.contains(&(params.turn_id.clone(), params.call_id.clone()))
+                {
                     requests_by_turn
                         .entry(params.turn_id.clone())
                         .or_default()
@@ -6005,16 +6007,16 @@ impl RuntimeThreadManager {
 
             turns.sort_by_key(|turn| turn.created_at);
             for turn in turns {
-                if completed_turns.contains(&turn.id) {
+                let unresolved_dynamic_tools =
+                    requests_by_turn.remove(&turn.id).unwrap_or_default();
+                if completed_turns.contains(&turn.id) && unresolved_dynamic_tools.is_empty() {
                     continue;
                 }
                 recovery_receipts
                     .entry(thread_id.clone())
                     .or_default()
                     .push(RecoveredTurnReceipt {
-                        unresolved_dynamic_tools: requests_by_turn
-                            .remove(&turn.id)
-                            .unwrap_or_default(),
+                        unresolved_dynamic_tools,
                         turn,
                     });
             }
@@ -6510,6 +6512,86 @@ fn reject_symlinked_store_dir(path: &Path) -> Result<()> {
 fn ensure_runtime_store_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("Failed to create {}", path.display()))?;
     reject_symlinked_store_dir(path)
+}
+
+/// Remove only an unterminated final JSONL fragment left by a process or
+/// machine stopping in the middle of `write_all`. A newline-terminated bad
+/// record is not crash debris we can identify safely, so normal replay keeps
+/// rejecting it instead of silently discarding durable data.
+fn repair_torn_event_log_tails(events_dir: &Path) -> Result<()> {
+    let events_dir = checked_existing_runtime_store_dir(events_dir)?;
+    for entry in fs::read_dir(&events_dir)
+        .with_context(|| format!("Failed to read {}", events_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+        {
+            continue;
+        }
+        reject_symlinked_store_file(&path)?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("Failed to inspect {}", path.display()))?
+            .is_file()
+        {
+            continue;
+        }
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("Failed to open {} for tail recovery", path.display()))?;
+        let len = file
+            .metadata()
+            .with_context(|| format!("Failed to inspect {}", path.display()))?
+            .len();
+        if len == 0 {
+            continue;
+        }
+
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0_u8; 1];
+        file.read_exact(&mut last)?;
+        if last[0] == b'\n' {
+            continue;
+        }
+
+        let mut search_end = len;
+        let mut truncate_at = 0_u64;
+        let mut buffer = [0_u8; 8 * 1024];
+        let buffer_len = u64::try_from(buffer.len()).expect("event recovery buffer fits u64");
+        while search_end > 0 {
+            let chunk_len = usize::try_from(search_end.min(buffer_len))
+                .expect("event recovery chunk length fits usize");
+            let chunk_len_u64 =
+                u64::try_from(chunk_len).expect("event recovery chunk length fits u64");
+            let chunk_start = search_end - chunk_len_u64;
+            file.seek(SeekFrom::Start(chunk_start))?;
+            file.read_exact(&mut buffer[..chunk_len])?;
+            if let Some(index) = buffer[..chunk_len].iter().rposition(|byte| *byte == b'\n') {
+                truncate_at = chunk_start
+                    + u64::try_from(index).expect("event recovery newline index fits u64")
+                    + 1;
+                break;
+            }
+            search_end = chunk_start;
+        }
+
+        file.set_len(truncate_at)
+            .with_context(|| format!("Failed to truncate torn tail in {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to sync repaired {}", path.display()))?;
+        tracing::warn!(
+            path = %path.display(),
+            removed_bytes = len.saturating_sub(truncate_at),
+            "Recovered an unterminated Runtime event-log tail"
+        );
+    }
+    Ok(())
 }
 
 fn read_store_file(path: &Path) -> Result<String> {
