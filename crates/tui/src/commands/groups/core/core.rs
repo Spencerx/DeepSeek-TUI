@@ -1434,7 +1434,8 @@ mod tests {
         let result = home_dashboard(&mut app);
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
-        assert!(msg.contains("codewhale Home Dashboard"));
+        assert!(msg.contains("Codewhale"));
+        assert!(!msg.contains("codewhale Home Dashboard"));
         assert!(msg.contains("Model:"));
         assert!(msg.contains("Mode:"));
         assert!(msg.contains("Workspace:"));
@@ -1501,7 +1502,10 @@ mod tests {
         let msg = result
             .message
             .expect("home dashboard should return message");
-        assert!(msg.contains("主面板"), "missing zh-Hans title:\n{msg}");
+        assert!(
+            msg.contains("Codewhale"),
+            "missing canonical product title:\n{msg}"
+        );
         assert!(msg.contains("模型"), "missing zh-Hans model label:\n{msg}");
         assert!(
             msg.contains("快捷操作"),
