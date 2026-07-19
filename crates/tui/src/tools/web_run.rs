@@ -7,9 +7,8 @@ use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_u64, required_str,
 };
-use crate::network_policy::{Decision, host_from_url};
+use super::web::guard::{DnsPin, guarded_reqwest_client_builder, validate_fetch_target};
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,11 +21,17 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{RwLock, RwLockWriteGuard};
 
+use super::web::scrape::{
+    ScrapedSearchResult, is_duckduckgo_challenge, parse_bing_results as scrape_bing_results,
+    parse_duckduckgo_results as scrape_duckduckgo_results,
+};
+
 const MAX_RESULTS: usize = 10;
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_OPEN_TIMEOUT_MS: u64 = 20_000;
 const MAX_WEB_RUN_SESSIONS: usize = 64;
 const MAX_PAGES_PER_SESSION: usize = 256;
+const MAX_REDIRECTS: usize = 5;
 const WEB_RUN_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
 
@@ -595,7 +600,7 @@ impl ToolSpec for WebRunTool {
                 if link_id == 0 {
                     return Err(ToolError::invalid_input("click.id must be >= 1"));
                 }
-                let page = get_page(&ref_id).ok_or_else(|| {
+                let page = get_page(&context.state_namespace, &ref_id).ok_or_else(|| {
                     ToolError::invalid_input(format!("Unknown ref_id '{ref_id}'"))
                 })?;
                 let link = page.links.iter().find(|l| l.id == link_id).ok_or_else(|| {
@@ -622,7 +627,7 @@ impl ToolSpec for WebRunTool {
             for find_req in find_requests {
                 let ref_id = required_str(find_req, "ref_id")?.to_string();
                 let pattern = required_str(find_req, "pattern")?.to_string();
-                let page = get_page(&ref_id).ok_or_else(|| {
+                let page = get_page(&context.state_namespace, &ref_id).ok_or_else(|| {
                     ToolError::invalid_input(format!("Unknown ref_id '{ref_id}'"))
                 })?;
                 let find_result = find_in_page(&ref_id, &pattern, &page, response_length);
@@ -638,7 +643,7 @@ impl ToolSpec for WebRunTool {
             for shot in shots {
                 let ref_id = required_str(shot, "ref_id")?.to_string();
                 let pageno = optional_u64(shot, "pageno", 0) as usize;
-                let page = get_page(&ref_id).ok_or_else(|| {
+                let page = get_page(&context.state_namespace, &ref_id).ok_or_else(|| {
                     ToolError::invalid_input(format!("Unknown ref_id '{ref_id}'"))
                 })?;
                 let screenshot = screenshot_page(&ref_id, pageno, &page)?;
@@ -722,15 +727,18 @@ fn store_page(namespace: &str, ref_id: &str, page: WebPage) {
     });
 }
 
-fn get_page(ref_id: &str) -> Option<Arc<WebPage>> {
+fn get_page(namespace: &str, ref_id: &str) -> Option<Arc<WebPage>> {
     let cache = WEB_RUN_STATE.get_or_init(WebRunCache::default);
     let stored = {
         let pages = cache.pages.read();
         pages.get(ref_id).cloned()
     }?;
+    if stored.namespace != namespace {
+        return None;
+    }
     {
         let mut sessions = cache.sessions.write();
-        if let Some(session) = sessions.get_mut(&stored.namespace) {
+        if let Some(session) = sessions.get_mut(namespace) {
             session.last_access = Instant::now();
         }
     }
@@ -754,12 +762,11 @@ async fn resolve_or_fetch_page(
     timeout_ms: u64,
     context: &ToolContext,
 ) -> Result<Arc<WebPage>, ToolError> {
-    if let Some(page) = get_page(ref_id) {
+    if let Some(page) = get_page(&context.state_namespace, ref_id) {
         return Ok(page);
     }
     if looks_like_url(ref_id) {
-        check_network_policy(ref_id, context)?;
-        return fetch_page(ref_id, timeout_ms).await.map(Arc::new);
+        return fetch_page(ref_id, timeout_ms, context).await.map(Arc::new);
     }
     Err(ToolError::invalid_input(format!(
         "Unknown ref_id '{ref_id}'"
@@ -1103,45 +1110,80 @@ fn page_from_search(query: &str, results: &[SearchEntry]) -> WebPage {
     }
 }
 
-/// Check network policy for a URL before fetching.
-/// Returns an error if the policy denies access.
-fn check_network_policy(url: &str, context: &ToolContext) -> Result<(), ToolError> {
-    let Some(decider) = context.network_policy.as_ref() else {
-        return Ok(());
-    };
-    let Some(host) = host_from_url(url) else {
-        return Ok(());
-    };
-    match decider.evaluate(&host, "web_run") {
-        Decision::Allow => Ok(()),
-        Decision::Deny => Err(ToolError::permission_denied(format!(
-            "network call to '{host}' blocked by network policy"
-        ))),
-        Decision::Prompt => Err(ToolError::permission_denied(format!(
-            "network call to '{host}' requires approval; \
-             re-run after `/network allow {host}` or set network.default = \"allow\" in config"
-        ))),
-    }
+async fn fetch_page(
+    url: &str,
+    timeout_ms: u64,
+    context: &ToolContext,
+) -> Result<WebPage, ToolError> {
+    fetch_page_with_initial_pin(url, timeout_ms, context, None).await
 }
 
-async fn fetch_page(url: &str, timeout_ms: u64) -> Result<WebPage, ToolError> {
-    let client = crate::tls::reqwest_client_builder()
-        .timeout(Duration::from_millis(timeout_ms))
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|e| ToolError::execution_failed(format!("Failed to build HTTP client: {e}")))?;
+async fn fetch_page_with_initial_pin(
+    url: &str,
+    timeout_ms: u64,
+    context: &ToolContext,
+    mut initial_pin: Option<DnsPin>,
+) -> Result<WebPage, ToolError> {
+    let mut current_url = reqwest::Url::parse(url)
+        .map_err(|e| ToolError::invalid_input(format!("invalid URL: {e}")))?;
+    let mut redirects_followed = 0usize;
 
-    let resp = client
-        .get(url)
-        .header(
-            "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
-        .header("Accept-Language", "en-US,en;q=0.5")
-        .send()
-        .await
-        .map_err(|e| ToolError::execution_failed(format!("Web request failed: {e}")))?;
+    let resp = loop {
+        let dns_pinning = if redirects_followed == 0 {
+            match initial_pin.take() {
+                Some(pin) => pin,
+                None => validate_fetch_target(&current_url, context, "web_run").await?,
+            }
+        } else {
+            validate_fetch_target(&current_url, context, "web_run").await?
+        };
+        let mut client_builder = guarded_reqwest_client_builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .user_agent(USER_AGENT)
+            .redirect(reqwest::redirect::Policy::none());
 
+        // Pin validated IP to prevent DNS rebinding (TOCTOU) — reqwest will
+        // connect to the validated IP directly instead of re-resolving.
+        if let Some((hostname, validated_ip)) = dns_pinning {
+            client_builder =
+                client_builder.resolve(&hostname, std::net::SocketAddr::new(validated_ip, 0));
+        }
+
+        let client = client_builder.build().map_err(|e| {
+            ToolError::execution_failed(format!("Failed to build HTTP client: {e}"))
+        })?;
+
+        let resp = client
+            .get(current_url.clone())
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header("Accept-Language", "en-US,en;q=0.5")
+            .send()
+            .await
+            .map_err(|e| ToolError::execution_failed(format!("Web request failed: {e}")))?;
+
+        if !resp.status().is_redirection() || redirects_followed >= MAX_REDIRECTS {
+            break resp;
+        }
+
+        let Some(location) = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+        else {
+            break resp;
+        };
+
+        current_url = resp
+            .url()
+            .join(location)
+            .map_err(|e| ToolError::execution_failed(format!("invalid redirect location: {e}")))?;
+        redirects_followed += 1;
+    };
+
+    let final_url = resp.url().to_string();
     let status = resp.status();
     let content_type = resp
         .headers()
@@ -1161,15 +1203,15 @@ async fn fetch_page(url: &str, timeout_ms: u64) -> Result<WebPage, ToolError> {
     }
 
     #[cfg(feature = "pdf")]
-    if is_pdf(&content_type, url) {
-        return parse_pdf_page(url, content_type, &bytes);
+    if is_pdf(&content_type, &final_url) {
+        return parse_pdf_page(&final_url, content_type, &bytes);
     }
 
     let body = String::from_utf8_lossy(&bytes).to_string();
-    let (lines, links, title) = parse_html(&body, url);
+    let (lines, links, title) = parse_html(&body, &final_url);
 
     Ok(WebPage {
-        url: url.to_string(),
+        url: final_url,
         title,
         content_type,
         lines,
@@ -1374,11 +1416,6 @@ static BLOCK_RE: OnceLock<Regex> = OnceLock::new();
 static SCRIPT_RE: OnceLock<Regex> = OnceLock::new();
 static STYLE_RE: OnceLock<Regex> = OnceLock::new();
 static TITLE_RE: OnceLock<Regex> = OnceLock::new();
-static SNIPPET_RE: OnceLock<Regex> = OnceLock::new();
-static SEARCH_TITLE_RE: OnceLock<Regex> = OnceLock::new();
-static BING_RESULT_RE: OnceLock<Regex> = OnceLock::new();
-static BING_TITLE_RE: OnceLock<Regex> = OnceLock::new();
-static BING_SNIPPET_RE: OnceLock<Regex> = OnceLock::new();
 
 fn get_anchor_re() -> &'static Regex {
     ANCHOR_RE.get_or_init(|| {
@@ -1408,43 +1445,6 @@ fn get_style_re() -> &'static Regex {
 
 fn get_title_re() -> &'static Regex {
     TITLE_RE.get_or_init(|| Regex::new(r"(?is)<title[^>]*>(.*?)</title>").unwrap())
-}
-
-fn get_search_title_re() -> &'static Regex {
-    SEARCH_TITLE_RE.get_or_init(|| {
-        Regex::new(r#"<a[^>]*class=\"result__a\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>"#)
-            .expect("title regex pattern is valid")
-    })
-}
-
-fn get_search_snippet_re() -> &'static Regex {
-    SNIPPET_RE.get_or_init(|| {
-        Regex::new(
-            r#"<a[^>]*class=\"result__snippet\"[^>]*>(.*?)</a>|<div[^>]*class=\"result__snippet\"[^>]*>(.*?)</div>"#,
-        )
-        .expect("snippet regex pattern is valid")
-    })
-}
-
-fn get_bing_result_re() -> &'static Regex {
-    BING_RESULT_RE.get_or_init(|| {
-        Regex::new(r#"(?is)<li[^>]*class=\"[^\"]*\bb_algo\b[^\"]*\"[^>]*>(.*?)</li>"#)
-            .expect("bing result regex pattern is valid")
-    })
-}
-
-fn get_bing_title_re() -> &'static Regex {
-    BING_TITLE_RE.get_or_init(|| {
-        Regex::new(r#"(?is)<h2[^>]*>.*?<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>"#)
-            .expect("bing title regex pattern is valid")
-    })
-}
-
-fn get_bing_snippet_re() -> &'static Regex {
-    BING_SNIPPET_RE.get_or_init(|| {
-        Regex::new(r#"(?is)<div[^>]*class=\"[^\"]*\bb_caption\b[^\"]*\"[^>]*>.*?<p[^>]*>(.*?)</p>"#)
-            .expect("bing snippet regex pattern is valid")
-    })
 }
 
 fn parse_html(html: &str, base_url: &str) -> (Vec<String>, Vec<WebLink>, Option<String>) {
@@ -1574,149 +1574,25 @@ fn decode_html_entities(text: &str) -> String {
 }
 
 fn parse_duckduckgo_results(html: &str, max_results: usize) -> Vec<SearchEntry> {
-    let title_re = get_search_title_re();
-    let snippet_re = get_search_snippet_re();
-    let snippets: Vec<String> = snippet_re
-        .captures_iter(html)
-        .filter_map(|cap| cap.get(1).or_else(|| cap.get(2)))
-        .map(|m| normalize_whitespace(&decode_html_entities(&strip_tags(m.as_str()))))
-        .collect();
-
-    let mut results = Vec::new();
-    for (idx, cap) in title_re.captures_iter(html).enumerate() {
-        if results.len() >= max_results {
-            break;
-        }
-        let href = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        let title_raw = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-        let title = normalize_whitespace(&decode_html_entities(&strip_tags(title_raw)));
-        if title.is_empty() {
-            continue;
-        }
-        let url = normalize_search_url(href);
-        let snippet = snippets
-            .get(idx)
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty());
-
-        results.push(SearchEntry {
-            title,
-            url,
-            snippet,
-        });
-    }
-
-    results
-}
-
-fn is_duckduckgo_challenge(html: &str) -> bool {
-    html.contains("anomaly-modal") || html.contains("Unfortunately, bots use DuckDuckGo too")
+    scrape_duckduckgo_results(html, max_results)
+        .into_iter()
+        .map(search_entry_from_scraped)
+        .collect()
 }
 
 fn parse_bing_results(html: &str, max_results: usize) -> Vec<SearchEntry> {
-    let mut results = Vec::new();
-    for cap in get_bing_result_re().captures_iter(html) {
-        if results.len() >= max_results {
-            break;
-        }
-        let Some(block) = cap.get(1).map(|m| m.as_str()) else {
-            continue;
-        };
-        let Some(title_cap) = get_bing_title_re().captures(block) else {
-            continue;
-        };
-        let href = title_cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        let title_raw = title_cap.get(2).map(|m| m.as_str()).unwrap_or("");
-        let title = normalize_whitespace(&decode_html_entities(&strip_tags(title_raw)));
-        if title.is_empty() {
-            continue;
-        }
-        let snippet = get_bing_snippet_re()
-            .captures(block)
-            .and_then(|snippet_cap| snippet_cap.get(1))
-            .map(|m| normalize_whitespace(&decode_html_entities(&strip_tags(m.as_str()))))
-            .filter(|s| !s.is_empty());
-
-        results.push(SearchEntry {
-            title,
-            url: normalize_bing_url(href),
-            snippet,
-        });
-    }
-
-    results
+    scrape_bing_results(html, max_results)
+        .into_iter()
+        .map(search_entry_from_scraped)
+        .collect()
 }
 
-fn normalize_search_url(href: &str) -> String {
-    if let Some(uddg) = extract_query_param(href, "uddg") {
-        let decoded = percent_decode(&uddg);
-        if !decoded.is_empty() {
-            return decoded;
-        }
+fn search_entry_from_scraped(entry: ScrapedSearchResult) -> SearchEntry {
+    SearchEntry {
+        title: entry.title,
+        url: entry.url,
+        snippet: entry.snippet,
     }
-    if href.starts_with("//") {
-        return format!("https:{href}");
-    }
-    if href.starts_with('/') {
-        return format!("https://duckduckgo.com{href}");
-    }
-    href.to_string()
-}
-
-fn normalize_bing_url(href: &str) -> String {
-    if let Some(encoded) = extract_query_param(href, "u") {
-        let decoded = percent_decode(&encoded);
-        let token = decoded.strip_prefix("a1").unwrap_or(&decoded);
-        let mut padded = token.replace('-', "+").replace('_', "/");
-        while !padded.len().is_multiple_of(4) {
-            padded.push('=');
-        }
-        if let Ok(bytes) = general_purpose::STANDARD.decode(padded)
-            && let Ok(url) = String::from_utf8(bytes)
-            && looks_like_url(&url)
-        {
-            return url;
-        }
-    }
-    if href.starts_with("//") {
-        return format!("https:{href}");
-    }
-    if href.starts_with('/') {
-        return format!("https://www.bing.com{href}");
-    }
-    href.to_string()
-}
-
-fn extract_query_param(url: &str, key: &str) -> Option<String> {
-    let query_start = url.find('?')?;
-    let query = &url[query_start + 1..];
-    for part in query.split('&') {
-        let (k, v) = part.split_once('=')?;
-        if k == key {
-            return Some(v.to_string());
-        }
-    }
-    None
-}
-
-fn percent_decode(input: &str) -> String {
-    let mut out = Vec::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut idx = 0;
-    while idx < bytes.len() {
-        if bytes[idx] == b'%'
-            && idx + 2 < bytes.len()
-            && let Ok(hex) = std::str::from_utf8(&bytes[idx + 1..idx + 3])
-            && let Ok(val) = u8::from_str_radix(hex, 16)
-        {
-            out.push(val);
-            idx += 3;
-            continue;
-        }
-        out.push(bytes[idx]);
-        idx += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn url_encode(input: &str) -> String {
@@ -1729,14 +1605,12 @@ fn url_encode(input: &str) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::{Mutex, MutexGuard};
+    use tokio::sync::{Mutex, MutexGuard};
 
-    static WEB_RUN_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static WEB_RUN_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
     fn lock_web_run_test_state() -> MutexGuard<'static, ()> {
-        WEB_RUN_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        WEB_RUN_TEST_LOCK.blocking_lock()
     }
 
     fn sample_page(url: &str) -> WebPage {
@@ -1748,6 +1622,16 @@ mod tests {
             links: Vec::new(),
             pdf_pages: None,
         }
+    }
+
+    fn sample_page_with_link(url: &str, target: &str) -> WebPage {
+        let mut page = sample_page(url);
+        page.links.push(WebLink {
+            id: 1,
+            url: target.to_string(),
+            text: "target".to_string(),
+        });
+        page
     }
 
     #[test]
@@ -1813,19 +1697,49 @@ mod tests {
     }
 
     #[test]
-    fn percent_decode_handles_utf8_multibyte_sequences() {
-        // Percent-encoded CJK: %E4%B8%AA%E4%BA%BA = 个人 (each glyph is 3 UTF-8 bytes).
-        assert_eq!(percent_decode("Hello %E4%B8%AA%E4%BA%BA"), "Hello 个人");
-        assert_eq!(percent_decode("%E7%B4%A0%E6%9D%90"), "素材");
-        // Percent-encoded UTF-8 inside a URL path (DuckDuckGo `uddg=` redirect shape).
-        assert_eq!(
-            percent_decode("https://example.com/%E9%A1%B5%E9%9D%A2"),
-            "https://example.com/页面"
+    fn web_run_search_path_filters_known_spam_domain() {
+        // The shared scraper used by web_run filters the known #964 spam family.
+        let html = r#"
+            <a class="result__a" href="https://astralia.forumgratuit.org/a">A</a>
+            <a class="result__snippet">spam</a>
+            <a class="result__a" href="https://russia.forumgratuit.org/b">B</a>
+            <a class="result__snippet">spam</a>
+            <a class="result__a" href="https://other.forumgratuit.org/c">C</a>
+            <a class="result__snippet">spam</a>
+            <a class="result__a" href="https://hello.forumgratuit.org/d">D</a>
+            <a class="result__snippet">spam</a>
+            <a class="result__a" href="https://world.forumgratuit.org/e">E</a>
+            <a class="result__snippet">spam</a>
+        "#;
+        let results = parse_duckduckgo_results(html, 10);
+        assert!(
+            results.is_empty(),
+            "web_run path must drop the known spam family via the shared scraper"
         );
-        // Raw UTF-8 in the input passes through unchanged.
-        assert_eq!(percent_decode("查询 keyword"), "查询 keyword");
-        // ASCII-only inputs preserve existing behavior; `+` stays literal.
-        assert_eq!(percent_decode("foo+bar%20baz"), "foo+bar baz");
+    }
+
+    #[test]
+    fn domain_scoped_fixture_preserves_legitimate_same_site_results() {
+        let html = r#"
+            <a class="result__a" href="https://docs.example.co.uk/a">A</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://docs.example.co.uk/b">B</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://docs.example.co.uk/c">C</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://other.example/d">D</a>
+            <a class="result__snippet">s</a>
+        "#;
+        let domains = vec!["docs.example.co.uk".to_string()];
+        let mut results = parse_duckduckgo_results(html, 10);
+        results.retain(|entry| domain_matches(&entry.url, &domains));
+
+        assert_eq!(results.len(), 3);
+        assert!(
+            results
+                .iter()
+                .all(|entry| entry.url.contains("docs.example.co.uk"))
+        );
     }
 
     #[cfg(feature = "pdf")]
@@ -1867,8 +1781,75 @@ mod tests {
             sample_page("https://example.com/alpha"),
         );
 
-        assert!(get_page(&ref_alpha).is_some());
-        assert!(get_page(&ref_beta).is_none());
+        assert!(get_page("session-alpha", &ref_alpha).is_some());
+        assert!(get_page("session-beta", &ref_alpha).is_none());
+        assert!(get_page("session-beta", &ref_beta).is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_open_rejects_exact_foreign_session_ref() {
+        let _lock = WEB_RUN_TEST_LOCK.lock().await;
+        reset_web_run_state();
+        let ref_id = format!("{}turn0search1", scoped_ref_prefix("foreign-open-owner"));
+        store_page(
+            "foreign-open-owner",
+            &ref_id,
+            sample_page("https://example.com/private-session-page"),
+        );
+        let context =
+            ToolContext::new(PathBuf::from(".")).with_state_namespace("foreign-open-caller");
+
+        let err = WebRunTool
+            .execute(json!({"open": [{"ref_id": ref_id}]}), &context)
+            .await
+            .expect_err("foreign exact ref must not open");
+
+        assert!(format!("{err}").contains("Unknown ref_id"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_click_rejects_exact_foreign_session_ref() {
+        let _lock = WEB_RUN_TEST_LOCK.lock().await;
+        reset_web_run_state();
+        let ref_id = format!("{}turn0search1", scoped_ref_prefix("foreign-click-owner"));
+        store_page(
+            "foreign-click-owner",
+            &ref_id,
+            sample_page_with_link(
+                "https://example.com/private-session-page",
+                "https://example.com/target",
+            ),
+        );
+        let context =
+            ToolContext::new(PathBuf::from(".")).with_state_namespace("foreign-click-caller");
+
+        let err = WebRunTool
+            .execute(json!({"click": [{"ref_id": ref_id, "id": 1}]}), &context)
+            .await
+            .expect_err("foreign exact ref must not be clickable");
+
+        assert!(format!("{err}").contains("Unknown ref_id"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_click_routes_target_through_shared_ssrf_guard() {
+        let _lock = WEB_RUN_TEST_LOCK.lock().await;
+        reset_web_run_state();
+        let namespace = "guarded-click-session";
+        let ref_id = format!("{}turn0search1", scoped_ref_prefix(namespace));
+        store_page(
+            namespace,
+            &ref_id,
+            sample_page_with_link("https://example.com/source", "http://127.0.0.1/admin"),
+        );
+        let context = ToolContext::new(PathBuf::from(".")).with_state_namespace(namespace);
+
+        let err = WebRunTool
+            .execute(json!({"click": [{"ref_id": ref_id, "id": 1}]}), &context)
+            .await
+            .expect_err("click target must be SSRF-guarded");
+
+        assert!(format!("{err}").contains("restricted address"));
     }
 
     #[test]
@@ -1879,8 +1860,8 @@ mod tests {
         let ref_id = format!("{}turn0search1", scoped_ref_prefix(namespace));
         store_page(namespace, &ref_id, sample_page("https://example.com/alpha"));
 
-        let first = get_page(&ref_id).expect("first page read");
-        let second = get_page(&ref_id).expect("second page read");
+        let first = get_page(namespace, &ref_id).expect("first page read");
+        let second = get_page(namespace, &ref_id).expect("second page read");
 
         assert!(Arc::ptr_eq(&first, &second));
     }
@@ -1915,7 +1896,7 @@ mod tests {
         });
 
         assert!(panic_result.is_err());
-        assert!(get_page(&ref_id).is_some());
+        assert!(get_page(namespace, &ref_id).is_some());
         assert_eq!(next_turn_for_namespace(namespace), 42);
     }
 
@@ -1951,7 +1932,7 @@ mod tests {
 
         let _ = next_turn_for_namespace("session-beta");
 
-        assert!(get_page(&ref_id).is_none());
+        assert!(get_page(namespace, &ref_id).is_none());
     }
 
     #[test]
@@ -1961,8 +1942,8 @@ mod tests {
         assert!(!looks_like_url("turn0search0"));
     }
 
-    #[test]
-    fn network_policy_denies_direct_open_url() {
+    #[tokio::test]
+    async fn network_policy_denies_direct_open_url() {
         use crate::network_policy::{Decision, NetworkPolicy, NetworkPolicyDecider};
 
         let policy = NetworkPolicy {
@@ -1970,13 +1951,83 @@ mod tests {
             allow: vec!["api.deepseek.com".to_string()],
             deny: vec![],
             proxy: Vec::new(),
+            proxy_fake_ip_cidrs: Vec::new(),
             audit: false,
         };
         let decider = NetworkPolicyDecider::new(policy, None);
         let ctx = ToolContext::new(PathBuf::from(".")).with_network_policy(decider);
 
-        let err = check_network_policy("https://example.com/private", &ctx)
+        let err = fetch_page("https://example.com/private", 5_000, &ctx)
+            .await
             .expect_err("blocked host should fail");
         assert!(format!("{err}").contains("blocked by network policy"));
+    }
+
+    fn ssrf_ctx() -> ToolContext {
+        ToolContext::new(PathBuf::from("."))
+    }
+
+    #[tokio::test]
+    async fn open_refuses_loopback_ip_url() {
+        let err = resolve_or_fetch_page("http://127.0.0.1/", 5_000, &ssrf_ctx())
+            .await
+            .expect_err("loopback open must be refused");
+        assert!(
+            format!("{err}").contains("restricted address"),
+            "expected restricted-address error; got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_refuses_private_range_ip_url() {
+        let err = resolve_or_fetch_page("http://192.168.1.50/admin", 5_000, &ssrf_ctx())
+            .await
+            .expect_err("private-range open must be refused");
+        assert!(
+            format!("{err}").contains("restricted address"),
+            "expected restricted-address error; got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_refuses_metadata_endpoint_ip_url() {
+        let err = resolve_or_fetch_page(
+            "http://169.254.169.254/latest/meta-data",
+            5_000,
+            &ssrf_ctx(),
+        )
+        .await
+        .expect_err("cloud metadata open must be refused");
+        assert!(
+            format!("{err}").contains("restricted address"),
+            "expected restricted-address error; got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_refuses_redirect_from_public_host_to_private_ip() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Use a public-looking hostname pinned to the local fixture for the
+        // already-validated first hop. The redirect itself still goes through
+        // the real shared guard inside fetch_page's redirect loop.
+        let server = MockServer::start().await;
+        let private_location = "http://10.0.0.5/internal";
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", private_location))
+            .mount(&server)
+            .await;
+        let host = "public-redirect.example.test";
+        let initial_url = format!("http://{host}:{}/", server.address().port());
+        let pin = Some((host.to_string(), "127.0.0.1".parse().unwrap()));
+
+        let err = fetch_page_with_initial_pin(&initial_url, 5_000, &ssrf_ctx(), Some(pin))
+            .await
+            .expect_err("guarded redirect to private IP must be refused");
+        assert!(
+            format!("{err}").contains("restricted address"),
+            "redirect loop must surface the shared guard rejection; got {err}"
+        );
     }
 }
