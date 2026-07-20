@@ -303,6 +303,40 @@ fn mirror_minimax_reasoning_details_for_body(body: &mut Value, provider: ApiProv
     mirror_minimax_reasoning_details_for_messages(messages);
 }
 
+fn sanitize_moonshot_chat_tools(chat_tools: &mut [Value]) -> Result<()> {
+    for tool in chat_tools {
+        let Some(function) = tool
+            .as_object_mut()
+            .and_then(|tool| tool.get_mut("function"))
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let Some(parameters) = function.get_mut("parameters") else {
+            continue;
+        };
+        let note = crate::tools::schema_sanitize::sanitize_for_kimi_parameters(parameters)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Moonshot function parameters failed safe compatibility validation: {error}"
+                )
+            })?;
+        if let Some(note) = note {
+            let description = function
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let description = if description.is_empty() {
+                note
+            } else {
+                format!("{description} {note}")
+            };
+            function.insert("description".to_string(), json!(description));
+        }
+    }
+    Ok(())
+}
+
 impl DeepSeekClient {
     pub(super) async fn create_message_chat(
         &self,
@@ -340,18 +374,11 @@ impl DeepSeekClient {
                 .iter()
                 .map(|tool| tool_to_chat_for_base_url(tool, &self.base_url))
                 .collect();
-            // Kimi / Moonshot enforces stricter JSON Schema: `type` must be
-            // inside `anyOf` / `oneOf` items, not on the parent (#2438).
+            // Moonshot function parameters must end at a plain object root.
+            // Flatten root composition, preserve valid nested anyOf, and fail
+            // closed before transport when an internal root ref is unsafe.
             if matches!(self.api_provider, crate::config::ApiProvider::Moonshot) {
-                for t in &mut chat_tools {
-                    if let Some(fn_obj) = t
-                        .as_object_mut()
-                        .and_then(|t| t.get_mut("function"))
-                        .and_then(|f| f.get_mut("parameters"))
-                    {
-                        crate::tools::schema_sanitize::sanitize_for_kimi_parameters(fn_obj);
-                    }
-                }
+                sanitize_moonshot_chat_tools(&mut chat_tools)?;
             }
             // xAI rejects a parameters root that is not a plain object schema
             // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
@@ -506,18 +533,10 @@ impl DeepSeekClient {
                 .iter()
                 .map(|tool| tool_to_chat_for_base_url(tool, &self.base_url))
                 .collect();
-            // Kimi / Moonshot enforces stricter JSON Schema: `type` must be
-            // inside `anyOf` / `oneOf` items, not on the parent (#2438).
+            // Keep streaming and non-streaming Moonshot tool contracts
+            // identical; invalid refs fail before any request is sent.
             if matches!(self.api_provider, crate::config::ApiProvider::Moonshot) {
-                for t in &mut chat_tools {
-                    if let Some(fn_obj) = t
-                        .as_object_mut()
-                        .and_then(|t| t.get_mut("function"))
-                        .and_then(|f| f.get_mut("parameters"))
-                    {
-                        crate::tools::schema_sanitize::sanitize_for_kimi_parameters(fn_obj);
-                    }
-                }
+                sanitize_moonshot_chat_tools(&mut chat_tools)?;
             }
             // xAI rejects a parameters root that is not a plain object schema
             // (e.g. apply_patch's root `oneOf` required-groups) with a 400.

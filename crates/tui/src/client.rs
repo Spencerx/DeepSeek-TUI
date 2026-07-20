@@ -2692,6 +2692,8 @@ mod tests {
     use crate::models::{
         ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, Tool,
     };
+    use crate::tools::apply_patch::ApplyPatchTool;
+    use crate::tools::spec::ToolSpec;
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2711,6 +2713,45 @@ mod tests {
             strict: Some(true),
             cache_control: None,
         }
+    }
+
+    fn apply_patch_request_tool() -> Tool {
+        let spec = ApplyPatchTool;
+        Tool {
+            tool_type: None,
+            name: spec.name().to_string(),
+            description: spec.description().to_string(),
+            input_schema: spec.input_schema(),
+            allowed_callers: None,
+            defer_loading: Some(false),
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn moonshot_request_boundary_client(
+        route_base_url: &str,
+        model: &str,
+        transport_base_url: String,
+    ) -> DeepSeekClient {
+        let mut client = DeepSeekClient::new(&Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(ProvidersConfig {
+                moonshot: ProviderConfig {
+                    api_key: Some("moonshot-request-boundary-key".to_string()),
+                    base_url: Some(route_base_url.to_string()),
+                    model: Some(model.to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("Moonshot request-boundary client");
+        assert_eq!(client.base_url, route_base_url);
+        client.test_chat_transport_base_url = Some(transport_base_url);
+        client
     }
 
     fn k3_request_fixture(model: &str, effort: Option<&str>, stream: bool) -> MessageRequest {
@@ -2781,22 +2822,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut client = DeepSeekClient::new(&Config {
-            provider: Some("moonshot".to_string()),
-            providers: Some(ProvidersConfig {
-                moonshot: ProviderConfig {
-                    api_key: Some("moonshot-request-boundary-key".to_string()),
-                    base_url: Some(route_base_url.to_string()),
-                    model: Some(model.to_string()),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        })
-        .expect("Moonshot request-boundary client");
-        assert_eq!(client.base_url, route_base_url);
-        client.test_chat_transport_base_url = Some(server.uri());
+        let client = moonshot_request_boundary_client(route_base_url, model, server.uri());
 
         if streaming {
             let mut stream = client
@@ -2957,6 +2983,82 @@ mod tests {
         assert!(assistant["tool_calls"].is_array(), "{assistant}");
     }
 
+    async fn assert_kimi_code_apply_patch_schema_is_mfjs_compatible(streaming: bool) {
+        let mut request =
+            k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), streaming);
+        request.tools = Some(vec![apply_patch_request_tool()]);
+
+        let body = capture_moonshot_chat_request_body(
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            request,
+        )
+        .await;
+        let function = &body["tools"][0]["function"];
+        let parameters = &function["parameters"];
+        assert_eq!(parameters["type"], "object", "{parameters}");
+        assert!(parameters.get("oneOf").is_none(), "{parameters}");
+        assert!(parameters.get("anyOf").is_none(), "{parameters}");
+        assert!(parameters.get("allOf").is_none(), "{parameters}");
+        assert_eq!(parameters["properties"]["patch"]["type"], "string");
+        assert_eq!(parameters["properties"]["replace"]["type"], "array");
+        assert_eq!(parameters["properties"]["changes"]["type"], "array");
+        assert!(
+            function["description"]
+                .as_str()
+                .is_some_and(|description| description
+                    .contains("Exactly one of these parameter groups must be provided")),
+            "the relaxed wire schema must preserve the runtime constraint in its description: {function}"
+        );
+    }
+
+    async fn assert_kimi_code_invalid_root_ref_fails_before_transport(streaming: bool) {
+        let server = MockServer::start().await;
+        let client = moonshot_request_boundary_client(
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            server.uri(),
+        );
+        let mut request =
+            k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), streaming);
+        let mut tool = test_tool("private_schema_tool");
+        tool.input_schema = json!({
+            "$ref": "#/$defs/private-root-name-3158",
+            "$defs": {}
+        });
+        request.tools = Some(vec![tool]);
+
+        let error = if streaming {
+            match client.create_message_stream(request).await {
+                Ok(_) => panic!("invalid streaming parameters reached transport"),
+                Err(error) => error,
+            }
+        } else {
+            match client.create_message(request).await {
+                Ok(_) => panic!("invalid non-streaming parameters reached transport"),
+                Err(error) => error,
+            }
+        };
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("failed safe compatibility validation"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("unresolved internal root reference"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("private-root-name-3158"));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("request log")
+                .is_empty(),
+            "invalid parameters must fail before transport"
+        );
+    }
+
     #[tokio::test]
     async fn create_message_request_json_honors_exact_k3_route_boundaries() {
         assert_k3_request_json_route_boundaries(false).await;
@@ -2975,6 +3077,26 @@ mod tests {
     #[tokio::test]
     async fn create_message_stream_replays_kimi_code_history_for_raw_off() {
         assert_kimi_code_raw_off_replays_tool_history(true).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_request_sends_mfjs_compatible_apply_patch_schema() {
+        assert_kimi_code_apply_patch_schema_is_mfjs_compatible(false).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_stream_sends_mfjs_compatible_apply_patch_schema() {
+        assert_kimi_code_apply_patch_schema_is_mfjs_compatible(true).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_request_rejects_invalid_kimi_root_ref_before_transport() {
+        assert_kimi_code_invalid_root_ref_fails_before_transport(false).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_stream_rejects_invalid_kimi_root_ref_before_transport() {
+        assert_kimi_code_invalid_root_ref_fails_before_transport(true).await;
     }
 
     const CONFIG_SECRET_SENTINELS: [&str; 8] = [

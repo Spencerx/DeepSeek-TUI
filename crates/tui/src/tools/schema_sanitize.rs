@@ -11,6 +11,8 @@
 //! Provider-specific helpers below add stricter DeepSeek and OpenAI Responses
 //! compatibility passes where their request shapes need it.
 
+use std::collections::HashSet;
+
 use serde_json::{Map, Value};
 
 use crate::models::Tool;
@@ -1051,67 +1053,169 @@ pub fn sanitize_for_kimi(schema: &mut serde_json::Value) {
     }
 }
 
+/// A safe, provider-facing reason that Kimi parameters could not be emitted.
+///
+/// These diagnostics deliberately never include the schema or `$ref` value:
+/// tool schemas can be supplied by MCP servers and may contain private data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum KimiParameterSchemaError {
+    #[error("Moonshot function parameters root must be a JSON object schema")]
+    RootMustBeObject,
+    #[error("Moonshot function parameters contain an unsupported root reference")]
+    UnsupportedRootReference,
+    #[error("Moonshot function parameters contain an unresolved internal root reference")]
+    UnresolvedRootReference,
+    #[error("Moonshot function parameters contain a cyclic internal root reference")]
+    CyclicRootReference,
+    #[error("Moonshot function parameters root reference must resolve to an object schema")]
+    ReferencedRootMustBeObject,
+    #[error("Moonshot function parameters contain unsupported nested allOf composition")]
+    UnsupportedNestedAllOf,
+    #[error("Moonshot function parameters contain conflicting nested union composition")]
+    ConflictingNestedUnion,
+}
+
 /// Normalize a complete Kimi / Moonshot `function.parameters` object.
 ///
-/// Kimi / Moonshot requires `"type": "object"` on the parameters root
-/// regardless of whether the schema uses `properties`, `$ref`, `anyOf`,
-/// `allOf`, or `oneOf`.  We run `sanitize_for_kimi` first so nested
-/// `anyOf` / `oneOf` handling is correct, then unconditionally ensure
-/// `type: object` is present at the root (#3281).
+/// Function parameters have an additional MFJS constraint: the root must end
+/// as a plain `type: "object"` schema. Root composition is flattened using the
+/// same compatibility pass as Responses and xAI, while supported nested
+/// `anyOf` branches remain nested. Internal root `$ref` values are resolved and
+/// inlined before normalization so we never manufacture the invalid
+/// `type + allOf($ref)` shape rejected by MFJS.
 ///
-/// This is root-only because recursively injecting `type: object` into
-/// every empty object would corrupt JSON Schema maps such as
-/// `"properties": {}`.
-pub fn sanitize_for_kimi_parameters(parameters: &mut serde_json::Value) {
-    if !parameters.is_object() {
-        *parameters = serde_json::Value::Object(Map::new());
+/// Unsupported, unresolved, cyclic, and non-object root references fail
+/// closed with a non-secret diagnostic instead of being sent to Moonshot.
+///
+/// MFJS differences from JSON Schema:
+/// https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-walle-vs-draft-2020-12.md
+pub fn sanitize_for_kimi_parameters(
+    parameters: &mut Value,
+) -> Result<Option<String>, KimiParameterSchemaError> {
+    let Some(root) = parameters.as_object() else {
+        return Err(KimiParameterSchemaError::RootMustBeObject);
+    };
+    if root
+        .get("type")
+        .is_some_and(|schema_type| schema_type != "object")
+    {
+        return Err(KimiParameterSchemaError::RootMustBeObject);
     }
 
-    // Run the generic Kimi pass first so nested `anyOf` / `oneOf` receive
-    // their `type` from the parent *before* we re-add it at the root.
+    inline_internal_kimi_root_ref(parameters)?;
+
+    // A function schema's root cannot carry MFJS composition because it must
+    // simultaneously be `type: object`. Flatten the actual root shape used by
+    // apply_patch and retain its dropped required-group contract as a prompt
+    // note for the model.
+    let constraint_note = sanitize_for_responses(parameters);
+
+    // MFJS supports anyOf but not oneOf. A nested oneOf can safely be widened
+    // to anyOf because Codewhale still validates the tool input before
+    // execution. Nested allOf cannot be widened without changing intersection
+    // semantics, so reject it rather than sending an invalid schema.
+    normalize_kimi_nested_composition(parameters, true)?;
+
+    // MFJS requires `type` to live inside each anyOf branch, never alongside
+    // the union keyword. The root is composition-free at this point, so this
+    // only adjusts valid nested unions.
     sanitize_for_kimi(parameters);
 
-    // Always ensure `type: object` at the parameters root.  Kimi/Moonshot
-    // rejects any parameters schema missing it (#3265, #3281).
-    //
-    // For bare `$ref` schemas (e.g. `{"$ref": "#/definitions/FileArgs"}`),
-    // we cannot add a sibling `type` because JSON Schema forbids sibling
-    // keywords alongside `$ref`.  Instead we wrap the $ref in an `allOf`
-    // array and inject `type: object` at the root — a standard JSON Schema
-    // pattern that preserves the $ref semantics.
-    if let Some(obj) = parameters.as_object_mut()
-        && !obj.contains_key("type")
+    let Some(root) = parameters.as_object() else {
+        return Err(KimiParameterSchemaError::RootMustBeObject);
+    };
+    if root.get("type").and_then(Value::as_str) != Some("object")
+        || root.contains_key("anyOf")
+        || root.contains_key("oneOf")
+        || root.contains_key("allOf")
+        || root.contains_key("$ref")
     {
-        if let Some(ref_val) = obj.remove("$ref") {
-            let mut new_root = serde_json::Map::new();
-            new_root.insert(
-                "type".to_string(),
-                serde_json::Value::String("object".to_string()),
-            );
-            new_root.insert(
-                "allOf".to_string(),
-                serde_json::Value::Array(vec![serde_json::json!({"$ref": ref_val})]),
-            );
-            // Preserve any other keys the original object may have had
-            // (e.g. "description") in the new root.
-            for (k, v) in obj.iter() {
-                if k != "$ref" {
-                    new_root.insert(k.clone(), v.clone());
-                }
-            }
-            *obj = new_root;
-        } else {
-            obj.insert(
-                "type".to_string(),
-                serde_json::Value::String("object".to_string()),
-            );
+        return Err(KimiParameterSchemaError::RootMustBeObject);
+    }
+
+    Ok(constraint_note)
+}
+
+fn inline_internal_kimi_root_ref(parameters: &mut Value) -> Result<(), KimiParameterSchemaError> {
+    let document = parameters.clone();
+    let Some(document_root) = document.as_object() else {
+        return Err(KimiParameterSchemaError::RootMustBeObject);
+    };
+    let Some(root_ref) = document_root.get("$ref") else {
+        return Ok(());
+    };
+    let Some(mut reference) = root_ref.as_str() else {
+        return Err(KimiParameterSchemaError::UnsupportedRootReference);
+    };
+
+    let mut visited = HashSet::new();
+    let resolved = loop {
+        if !reference.starts_with("#/") {
+            return Err(KimiParameterSchemaError::UnsupportedRootReference);
+        }
+        if !visited.insert(reference.to_string()) {
+            return Err(KimiParameterSchemaError::CyclicRootReference);
+        }
+        let target = document
+            .pointer(&reference[1..])
+            .ok_or(KimiParameterSchemaError::UnresolvedRootReference)?;
+        let target = target
+            .as_object()
+            .ok_or(KimiParameterSchemaError::ReferencedRootMustBeObject)?;
+        if let Some(next_ref) = target.get("$ref") {
+            reference = next_ref
+                .as_str()
+                .ok_or(KimiParameterSchemaError::UnsupportedRootReference)?;
+            continue;
+        }
+        if target.get("type").and_then(Value::as_str) != Some("object") {
+            return Err(KimiParameterSchemaError::ReferencedRootMustBeObject);
+        }
+        break target.clone();
+    };
+
+    let mut inlined = resolved;
+    for (key, value) in document_root {
+        if key != "$ref" {
+            inlined.insert(key.clone(), value.clone());
         }
     }
+    *parameters = Value::Object(inlined);
+    Ok(())
+}
+
+fn normalize_kimi_nested_composition(
+    schema: &mut Value,
+    is_root: bool,
+) -> Result<(), KimiParameterSchemaError> {
+    if let Some(obj) = schema.as_object_mut() {
+        if !is_root {
+            if obj.contains_key("allOf") {
+                return Err(KimiParameterSchemaError::UnsupportedNestedAllOf);
+            }
+            if let Some(one_of) = obj.remove("oneOf") {
+                if obj.contains_key("anyOf") {
+                    return Err(KimiParameterSchemaError::ConflictingNestedUnion);
+                }
+                obj.insert("anyOf".to_string(), one_of);
+            }
+        }
+        for value in obj.values_mut() {
+            normalize_kimi_nested_composition(value, false)?;
+        }
+    } else if let Some(items) = schema.as_array_mut() {
+        for item in items {
+            normalize_kimi_nested_composition(item, false)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod kimi_tests {
     use super::*;
+    use crate::tools::apply_patch::ApplyPatchTool;
+    use crate::tools::spec::ToolSpec;
     use serde_json::json;
 
     #[test]
@@ -1198,8 +1302,8 @@ mod kimi_tests {
     #[test]
     fn kimi_parameters_add_type_to_empty_root() {
         let mut schema = json!({});
-        sanitize_for_kimi_parameters(&mut schema);
-        assert_eq!(schema, json!({"type": "object"}));
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
+        assert_eq!(schema, json!({"type": "object", "properties": {}}));
     }
 
     #[test]
@@ -1211,15 +1315,15 @@ mod kimi_tests {
             "required": ["path"]
         });
 
-        sanitize_for_kimi_parameters(&mut schema);
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
 
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["properties"]["path"]["type"], "string");
         assert!(schema["properties"].get("type").is_none());
     }
 
-    // #3281: root schemas using $ref, allOf, anyOf, oneOf must also
-    // receive type: object so Kimi/Moonshot does not reject them.
+    // Function parameters must end as a plain object root. Composition stays
+    // available only in valid nested anyOf positions.
 
     #[test]
     fn kimi_parameters_add_type_to_anyof_root() {
@@ -1229,9 +1333,10 @@ mod kimi_tests {
                 {"type": "null"}
             ]
         });
-        sanitize_for_kimi_parameters(&mut schema);
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
         assert_eq!(schema["type"], "object");
-        assert!(schema["anyOf"].is_array());
+        assert!(schema.get("anyOf").is_none());
+        assert_eq!(schema["properties"]["path"]["type"], "string");
     }
 
     #[test]
@@ -1241,9 +1346,10 @@ mod kimi_tests {
                 {"type": "object", "properties": {"name": {"type": "string"}}}
             ]
         });
-        sanitize_for_kimi_parameters(&mut schema);
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
         assert_eq!(schema["type"], "object");
-        assert!(schema["allOf"].is_array());
+        assert!(schema.get("allOf").is_none());
+        assert_eq!(schema["properties"]["name"]["type"], "string");
     }
 
     #[test]
@@ -1254,20 +1360,136 @@ mod kimi_tests {
                 {"type": "object", "properties": {"name": {"type": "string"}}}
             ]
         });
-        sanitize_for_kimi_parameters(&mut schema);
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
         assert_eq!(schema["type"], "object");
-        assert!(schema["oneOf"].is_array());
+        assert!(schema.get("oneOf").is_none());
+        assert_eq!(schema["properties"]["id"]["type"], "integer");
+        assert_eq!(schema["properties"]["name"]["type"], "string");
     }
 
     #[test]
-    fn kimi_parameters_wraps_ref_in_allof_with_type_object() {
-        let mut schema = json!({"$ref": "#/definitions/FileArgs"});
-        sanitize_for_kimi_parameters(&mut schema);
-        // $ref cannot have sibling keywords per JSON Schema, so we wrap
-        // it in allOf and inject type: object at the root (#3281).
+    fn kimi_parameters_flattens_actual_apply_patch_root_and_returns_constraint_note() {
+        let mut schema = ApplyPatchTool.input_schema();
+
+        let note = sanitize_for_kimi_parameters(&mut schema).unwrap();
+
         assert_eq!(schema["type"], "object");
-        assert!(schema["allOf"].is_array());
-        assert_eq!(schema["allOf"][0]["$ref"], "#/definitions/FileArgs");
+        assert!(schema.get("oneOf").is_none());
+        assert!(schema.get("anyOf").is_none());
+        assert!(schema.get("allOf").is_none());
+        assert_eq!(schema["properties"]["patch"]["type"], "string");
+        assert_eq!(schema["properties"]["replace"]["type"], "array");
+        assert_eq!(schema["properties"]["changes"]["type"], "array");
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "Exactly one of these parameter groups must be provided: `changes` | `patch` | `replace`."
+            )
+        );
+    }
+
+    #[test]
+    fn kimi_parameters_preserves_nested_anyof_branches() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "selector": {
+                    "type": "object",
+                    "anyOf": [
+                        {"properties": {"path": {"type": "string"}}},
+                        {"properties": {"id": {"type": "integer"}}}
+                    ]
+                }
+            }
+        });
+
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
+
+        assert_eq!(schema["type"], "object");
+        let selector = &schema["properties"]["selector"];
+        assert!(selector.get("type").is_none());
+        let branches = selector["anyOf"].as_array().unwrap();
+        assert_eq!(branches.len(), 2);
+        assert!(branches.iter().all(|branch| branch["type"] == "object"));
+    }
+
+    #[test]
+    fn kimi_parameters_converts_nested_oneof_to_supported_anyof() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "selector": {
+                    "type": "object",
+                    "oneOf": [
+                        {"properties": {"path": {"type": "string"}}},
+                        {"properties": {"id": {"type": "integer"}}}
+                    ]
+                }
+            }
+        });
+
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
+
+        let selector = &schema["properties"]["selector"];
+        assert!(selector.get("oneOf").is_none());
+        assert!(selector["anyOf"].is_array());
+        assert!(selector.get("type").is_none());
+    }
+
+    #[test]
+    fn kimi_parameters_inlines_valid_internal_object_root_ref() {
+        let mut schema = json!({
+            "$ref": "#/$defs/FileArgs",
+            "$defs": {
+                "FileArgs": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            },
+            "description": "File arguments"
+        });
+
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["path"]["type"], "string");
+        assert_eq!(schema["required"], json!(["path"]));
+        assert_eq!(schema["description"], "File arguments");
+        assert!(schema["$defs"].is_object());
         assert!(schema.get("$ref").is_none());
+        assert!(schema.get("allOf").is_none());
+    }
+
+    #[test]
+    fn kimi_parameters_rejects_unresolved_root_ref_without_leaking_it() {
+        let mut schema = json!({
+            "$ref": "#/$defs/private-schema-name-9217",
+            "$defs": {}
+        });
+        let original = schema.clone();
+
+        let error = sanitize_for_kimi_parameters(&mut schema).unwrap_err();
+
+        assert_eq!(error, KimiParameterSchemaError::UnresolvedRootReference);
+        assert!(!error.to_string().contains("private-schema-name-9217"));
+        assert_eq!(schema, original, "a rejected schema must never be emitted");
+    }
+
+    #[test]
+    fn kimi_parameters_rejects_non_object_root_ref_without_leaking_it() {
+        let mut schema = json!({
+            "$ref": "#/$defs/private-scalar-name-4831",
+            "$defs": {
+                "private-scalar-name-4831": {"type": "string"}
+            }
+        });
+        let original = schema.clone();
+
+        let error = sanitize_for_kimi_parameters(&mut schema).unwrap_err();
+
+        assert_eq!(error, KimiParameterSchemaError::ReferencedRootMustBeObject);
+        assert!(!error.to_string().contains("private-scalar-name-4831"));
+        assert_eq!(schema, original, "a rejected schema must never be emitted");
     }
 }
