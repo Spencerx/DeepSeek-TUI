@@ -1025,8 +1025,27 @@ pub fn sanitize_for_kimi(schema: &mut serde_json::Value) {
     if let Some(obj) = schema.as_object_mut() {
         // Recurse first so a type injected into this object's alternatives is
         // not immediately removed again by processing that freshly-mutated item.
-        for (_, v) in obj.iter_mut() {
-            sanitize_for_kimi(v);
+        for map_key in ["properties", "$defs"] {
+            if let Some(children) = obj.get_mut(map_key).and_then(Value::as_object_mut) {
+                for child in children.values_mut() {
+                    sanitize_for_kimi(child);
+                }
+            }
+        }
+        if let Some(items) = obj.get_mut("items") {
+            sanitize_for_kimi(items);
+        }
+        if let Some(additional) = obj.get_mut("additionalProperties")
+            && additional.is_object()
+        {
+            sanitize_for_kimi(additional);
+        }
+        for union_key in ["anyOf", "oneOf"] {
+            if let Some(branches) = obj.get_mut(union_key).and_then(Value::as_array_mut) {
+                for branch in branches {
+                    sanitize_for_kimi(branch);
+                }
+            }
         }
 
         // If this object has `type` + `anyOf`/`oneOf`, push `type` into
@@ -1045,10 +1064,17 @@ pub fn sanitize_for_kimi(schema: &mut serde_json::Value) {
                     }
                 }
             }
-        }
-    } else if let Some(arr) = schema.as_array_mut() {
-        for v in arr.iter_mut() {
-            sanitize_for_kimi(v);
+            // The provider-neutral sanitizer injects an empty `properties`
+            // map on every bare object before this provider pass. MFJS permits
+            // only annotations beside `anyOf`, so remove that semantic no-op
+            // after moving the object type into each branch.
+            if obj
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(Map::is_empty)
+            {
+                obj.remove("properties");
+            }
         }
     }
 }
@@ -1073,6 +1099,20 @@ pub enum KimiParameterSchemaError {
     UnsupportedNestedAllOf,
     #[error("Moonshot function parameters contain conflicting nested union composition")]
     ConflictingNestedUnion,
+    #[error("Moonshot function parameters contain an unsupported const literal")]
+    UnsupportedConstLiteral,
+    #[error("Moonshot function parameters contain conflicting literal constraints")]
+    ConflictingLiteralConstraint,
+    #[error("Moonshot function parameters contain an invalid nullable marker")]
+    InvalidNullable,
+    #[error("Moonshot function parameters contain an unsupported MFJS keyword")]
+    UnsupportedKeyword,
+    #[error("Moonshot function parameters contain an invalid MFJS schema node")]
+    InvalidSchemaNode,
+    #[error("Moonshot function parameters contain an invalid MFJS keyword value")]
+    InvalidKeywordValue,
+    #[error("Moonshot function parameters contain an invalid MFJS reference")]
+    InvalidReference,
 }
 
 /// Normalize a complete Kimi / Moonshot `function.parameters` object.
@@ -1090,6 +1130,18 @@ pub enum KimiParameterSchemaError {
 /// MFJS differences from JSON Schema:
 /// https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-walle-vs-draft-2020-12.md
 pub fn sanitize_for_kimi_parameters(
+    parameters: &mut Value,
+) -> Result<Option<String>, KimiParameterSchemaError> {
+    // Work on a clone so a rejected schema remains byte-for-byte unchanged for
+    // callers that retain the catalog and retry against another provider.
+    let mut candidate = parameters.clone();
+    let constraint_note = sanitize_kimi_parameters_candidate(&mut candidate)?;
+    validate_mfjs_parameters(&candidate)?;
+    *parameters = candidate;
+    Ok(constraint_note)
+}
+
+fn sanitize_kimi_parameters_candidate(
     parameters: &mut Value,
 ) -> Result<Option<String>, KimiParameterSchemaError> {
     let Some(root) = parameters.as_object() else {
@@ -1110,11 +1162,11 @@ pub fn sanitize_for_kimi_parameters(
     // note for the model.
     let constraint_note = sanitize_for_responses(parameters);
 
-    // MFJS supports anyOf but not oneOf. A nested oneOf can safely be widened
-    // to anyOf because Codewhale still validates the tool input before
-    // execution. Nested allOf cannot be widened without changing intersection
-    // semantics, so reject it rather than sending an invalid schema.
-    normalize_kimi_nested_composition(parameters, true)?;
+    // Restore nullable unions collapsed by the registry's provider-neutral
+    // sanitizer, translate MFJS-safe scalar const values, and normalize nested
+    // composition. Codewhale still validates tool input before execution, so
+    // widening oneOf to MFJS's anyOf remains safe; allOf fails closed.
+    normalize_kimi_compatibility(parameters, true)?;
 
     // MFJS requires `type` to live inside each anyOf branch, never alongside
     // the union keyword. The root is composition-free at this point, so this
@@ -1184,28 +1236,371 @@ fn inline_internal_kimi_root_ref(parameters: &mut Value) -> Result<(), KimiParam
     Ok(())
 }
 
-fn normalize_kimi_nested_composition(
+fn normalize_kimi_compatibility(
     schema: &mut Value,
     is_root: bool,
 ) -> Result<(), KimiParameterSchemaError> {
-    if let Some(obj) = schema.as_object_mut() {
+    let Some(obj) = schema.as_object_mut() else {
+        return Err(KimiParameterSchemaError::InvalidSchemaNode);
+    };
+
+    if !is_root {
+        if obj.contains_key("allOf") {
+            return Err(KimiParameterSchemaError::UnsupportedNestedAllOf);
+        }
+        if let Some(one_of) = obj.remove("oneOf") {
+            if obj.contains_key("anyOf") {
+                return Err(KimiParameterSchemaError::ConflictingNestedUnion);
+            }
+            obj.insert("anyOf".to_string(), one_of);
+        }
+    }
+
+    if let Some(constant) = obj.remove("const") {
+        if !is_mfjs_enum_literal(&constant) {
+            return Err(KimiParameterSchemaError::UnsupportedConstLiteral);
+        }
+        if let Some(existing) = obj.get("enum") {
+            let agrees = existing
+                .as_array()
+                .is_some_and(|values| values.as_slice() == [constant.clone()]);
+            if !agrees {
+                return Err(KimiParameterSchemaError::ConflictingLiteralConstraint);
+            }
+        } else {
+            obj.insert("enum".to_string(), Value::Array(vec![constant]));
+        }
+    }
+
+    let nullable = obj.remove("nullable");
+    match nullable.as_ref().map(Value::as_bool) {
+        None => {}
+        Some(Some(false)) => {}
+        Some(Some(true)) if is_root => {
+            // Function parameters are required to be an object at the root;
+            // null was never a valid wire instance there.
+        }
+        Some(Some(true)) => {
+            let non_null = Value::Object(std::mem::take(obj));
+            *schema = serde_json::json!({
+                "anyOf": [non_null, {"type": "null"}]
+            });
+        }
+        Some(None) => return Err(KimiParameterSchemaError::InvalidNullable),
+    }
+
+    normalize_kimi_child_schemas(schema)?;
+    Ok(())
+}
+
+fn normalize_kimi_child_schemas(schema: &mut Value) -> Result<(), KimiParameterSchemaError> {
+    let Some(obj) = schema.as_object_mut() else {
+        return Err(KimiParameterSchemaError::InvalidSchemaNode);
+    };
+
+    for map_key in ["properties", "$defs"] {
+        if let Some(children) = obj.get_mut(map_key).and_then(Value::as_object_mut) {
+            for child in children.values_mut() {
+                normalize_kimi_compatibility(child, false)?;
+            }
+        }
+    }
+
+    if let Some(items) = obj.get_mut("items") {
+        normalize_kimi_compatibility(items, false)?;
+    }
+    if let Some(additional) = obj.get_mut("additionalProperties")
+        && additional.is_object()
+    {
+        normalize_kimi_compatibility(additional, false)?;
+    }
+    if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
+        for branch in branches {
+            normalize_kimi_compatibility(branch, false)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_mfjs_enum_literal(value: &Value) -> bool {
+    value.is_string() || value.is_number()
+}
+
+/// Validate one fully normalized MFJS function-parameters schema.
+///
+/// Every error is a fixed enum variant: schemas can originate in MCP or
+/// runtime tools and may contain private names or values, so diagnostics must
+/// never echo a keyword, property, reference, or literal from the document.
+pub fn validate_mfjs_parameters(parameters: &Value) -> Result<(), KimiParameterSchemaError> {
+    let root = parameters
+        .as_object()
+        .ok_or(KimiParameterSchemaError::RootMustBeObject)?;
+    if root.get("type").and_then(Value::as_str) != Some("object")
+        || root.contains_key("anyOf")
+        || root.contains_key("oneOf")
+        || root.contains_key("allOf")
+        || root.contains_key("$ref")
+    {
+        return Err(KimiParameterSchemaError::RootMustBeObject);
+    }
+    validate_mfjs_schema(parameters, parameters, true, false)
+}
+
+fn validate_mfjs_schema(
+    schema: &Value,
+    document: &Value,
+    is_root: bool,
+    allow_empty: bool,
+) -> Result<(), KimiParameterSchemaError> {
+    let obj = schema
+        .as_object()
+        .ok_or(KimiParameterSchemaError::InvalidSchemaNode)?;
+    if obj.is_empty() && !allow_empty {
+        return Err(KimiParameterSchemaError::InvalidSchemaNode);
+    }
+
+    const ALLOWED_KEYWORDS: &[&str] = &[
+        "$id",
+        "$ref",
+        "$defs",
+        "anyOf",
+        "properties",
+        "additionalProperties",
+        "items",
+        "type",
+        "enum",
+        "required",
+        "maxLength",
+        "minLength",
+        "maximum",
+        "minimum",
+        "maxItems",
+        "minItems",
+        "title",
+        "description",
+        "default",
+    ];
+    if obj
+        .keys()
+        .any(|keyword| !ALLOWED_KEYWORDS.contains(&keyword.as_str()))
+    {
+        return Err(KimiParameterSchemaError::UnsupportedKeyword);
+    }
+
+    for annotation in ["title", "description"] {
+        if obj.get(annotation).is_some_and(|value| !value.is_string()) {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
+        }
+    }
+    if obj.get("$id").is_some_and(|value| !value.is_string())
+        || (!is_root && obj.contains_key("$id"))
+    {
+        return Err(KimiParameterSchemaError::InvalidKeywordValue);
+    }
+
+    if let Some(definitions) = obj.get("$defs") {
         if !is_root {
-            if obj.contains_key("allOf") {
-                return Err(KimiParameterSchemaError::UnsupportedNestedAllOf);
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
+        }
+        let definitions = definitions
+            .as_object()
+            .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+        for (name, definition) in definitions {
+            if name.contains('/') {
+                return Err(KimiParameterSchemaError::InvalidKeywordValue);
             }
-            if let Some(one_of) = obj.remove("oneOf") {
-                if obj.contains_key("anyOf") {
-                    return Err(KimiParameterSchemaError::ConflictingNestedUnion);
-                }
-                obj.insert("anyOf".to_string(), one_of);
+            validate_mfjs_schema(definition, document, false, false)?;
+        }
+    }
+
+    if let Some(reference) = obj.get("$ref") {
+        let reference = reference
+            .as_str()
+            .ok_or(KimiParameterSchemaError::InvalidReference)?;
+        let valid_target = if reference == "#" {
+            Some(document)
+        } else if reference.starts_with("#/$defs/")
+            && !reference.trim_start_matches("#/$defs/").contains('/')
+        {
+            document.pointer(&reference[1..])
+        } else {
+            None
+        };
+        if !valid_target.is_some_and(Value::is_object) {
+            return Err(KimiParameterSchemaError::InvalidReference);
+        }
+        let allowed_ref_sibling = |key: &str| matches!(key, "$ref" | "title" | "description");
+        if obj.keys().any(|key| !allowed_ref_sibling(key)) {
+            return Err(KimiParameterSchemaError::InvalidReference);
+        }
+        return Ok(());
+    }
+
+    if let Some(any_of) = obj.get("anyOf") {
+        let branches = any_of
+            .as_array()
+            .filter(|branches| !branches.is_empty())
+            .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+        let allowed_union_sibling = |key: &str| matches!(key, "anyOf" | "title" | "description");
+        if obj.keys().any(|key| !allowed_union_sibling(key)) {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
+        }
+        for branch in branches {
+            validate_mfjs_schema(branch, document, false, false)?;
+        }
+        return Ok(());
+    }
+
+    let schema_type = match obj.get("type") {
+        Some(Value::String(schema_type))
+            if matches!(
+                schema_type.as_str(),
+                "null" | "boolean" | "object" | "array" | "number" | "integer" | "string"
+            ) =>
+        {
+            Some(schema_type.as_str())
+        }
+        Some(_) => return Err(KimiParameterSchemaError::InvalidKeywordValue),
+        None => None,
+    };
+
+    if let Some(values) = obj.get("enum") {
+        validate_mfjs_enum(values, schema_type)?;
+    }
+
+    if let Some(properties) = obj.get("properties") {
+        if schema_type != Some("object") {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
+        }
+        let properties = properties
+            .as_object()
+            .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+        for (name, property) in properties {
+            if matches!(
+                name.as_str(),
+                "$defs" | "$ref" | "anyOf" | "required" | "additionalProperties"
+            ) {
+                return Err(KimiParameterSchemaError::InvalidKeywordValue);
+            }
+            validate_mfjs_schema(property, document, false, false)?;
+        }
+    }
+
+    if let Some(required) = obj.get("required") {
+        if schema_type != Some("object") {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
+        }
+        let required = required
+            .as_array()
+            .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+        let properties = obj
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+        let mut seen = HashSet::new();
+        for name in required {
+            let name = name
+                .as_str()
+                .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+            if !properties.contains_key(name) || !seen.insert(name) {
+                return Err(KimiParameterSchemaError::InvalidKeywordValue);
             }
         }
-        for value in obj.values_mut() {
-            normalize_kimi_nested_composition(value, false)?;
+    }
+
+    if let Some(additional) = obj.get("additionalProperties") {
+        if schema_type != Some("object") {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
         }
-    } else if let Some(items) = schema.as_array_mut() {
-        for item in items {
-            normalize_kimi_nested_composition(item, false)?;
+        match additional {
+            Value::Bool(_) => {}
+            Value::Object(_) => validate_mfjs_schema(additional, document, false, true)?,
+            _ => return Err(KimiParameterSchemaError::InvalidKeywordValue),
+        }
+    }
+
+    if let Some(items) = obj.get("items") {
+        if schema_type != Some("array") {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
+        }
+        validate_mfjs_schema(items, document, false, false)?;
+    }
+
+    validate_mfjs_bounds(obj, schema_type)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MfjsLiteralKind {
+    Integer,
+    Number,
+    String,
+}
+
+fn mfjs_literal_kind(value: &Value) -> Option<MfjsLiteralKind> {
+    if value.is_string() {
+        return Some(MfjsLiteralKind::String);
+    }
+    let number = value.as_number()?;
+    if number.is_i64() || number.is_u64() {
+        Some(MfjsLiteralKind::Integer)
+    } else {
+        Some(MfjsLiteralKind::Number)
+    }
+}
+
+fn validate_mfjs_enum(
+    value: &Value,
+    schema_type: Option<&str>,
+) -> Result<(), KimiParameterSchemaError> {
+    let values = value
+        .as_array()
+        .filter(|values| !values.is_empty())
+        .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+    let kind =
+        mfjs_literal_kind(&values[0]).ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+    if values
+        .iter()
+        .any(|value| mfjs_literal_kind(value) != Some(kind))
+    {
+        return Err(KimiParameterSchemaError::InvalidKeywordValue);
+    }
+    let type_matches = match (schema_type, kind) {
+        (None, _) => true,
+        (Some("string"), MfjsLiteralKind::String) => true,
+        (Some("integer"), MfjsLiteralKind::Integer) => true,
+        (Some("number"), MfjsLiteralKind::Integer | MfjsLiteralKind::Number) => true,
+        _ => false,
+    };
+    if !type_matches {
+        return Err(KimiParameterSchemaError::InvalidKeywordValue);
+    }
+    Ok(())
+}
+
+fn validate_mfjs_bounds(
+    obj: &Map<String, Value>,
+    schema_type: Option<&str>,
+) -> Result<(), KimiParameterSchemaError> {
+    for keyword in ["minLength", "maxLength"] {
+        if let Some(value) = obj.get(keyword)
+            && (schema_type != Some("string") || value.as_u64().is_none())
+        {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
+        }
+    }
+    for keyword in ["minItems", "maxItems"] {
+        if let Some(value) = obj.get(keyword)
+            && (schema_type != Some("array") || value.as_u64().is_none())
+        {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
+        }
+    }
+    for keyword in ["minimum", "maximum"] {
+        if let Some(value) = obj.get(keyword)
+            && (!matches!(schema_type, Some("integer" | "number")) || !value.is_number())
+        {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
         }
     }
     Ok(())
@@ -1434,6 +1829,109 @@ mod kimi_tests {
         assert!(selector.get("oneOf").is_none());
         assert!(selector["anyOf"].is_array());
         assert!(selector.get("type").is_none());
+    }
+
+    #[test]
+    fn kimi_parameters_restores_registry_collapsed_nullable_anyof() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "null"}
+                    ]
+                }
+            }
+        });
+
+        // Exercise the exact two-stage production path: ToolRegistry applies
+        // the provider-neutral pass before the Moonshot request adapter sees
+        // the schema.
+        sanitize(&mut schema);
+        assert_eq!(schema["properties"]["query"]["nullable"], true);
+        assert!(schema["properties"]["query"].get("anyOf").is_none());
+
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
+
+        let query = &schema["properties"]["query"];
+        assert!(query.get("nullable").is_none(), "{query}");
+        assert_eq!(
+            query["anyOf"],
+            json!([{"type": "string"}, {"type": "null"}])
+        );
+        validate_mfjs_parameters(&schema).unwrap();
+    }
+
+    #[test]
+    fn kimi_parameters_recursively_translates_safe_const_to_enum() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "envelope": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"type": "string", "const": "var_handle"}
+                                },
+                                "required": ["kind"]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
+
+        let kind = schema
+            .pointer("/properties/envelope/properties/items/items/properties/kind")
+            .expect("nested kind schema");
+        assert!(kind.get("const").is_none(), "{kind}");
+        assert_eq!(kind["enum"], json!(["var_handle"]));
+    }
+
+    #[test]
+    fn kimi_parameters_rejects_unsafe_const_without_mutating_or_leaking() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "private-toggle-8172": {"type": "boolean", "const": true}
+            }
+        });
+        let original = schema.clone();
+
+        let error = sanitize_for_kimi_parameters(&mut schema).unwrap_err();
+
+        assert_eq!(error, KimiParameterSchemaError::UnsupportedConstLiteral);
+        assert!(!error.to_string().contains("private-toggle-8172"));
+        assert_eq!(schema, original, "a rejected schema must remain reusable");
+    }
+
+    #[test]
+    fn kimi_parameters_validator_fails_closed_without_echoing_schema_values() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "private-field-4921": {
+                    "type": "string",
+                    "pattern": "private-pattern-value-7395"
+                }
+            }
+        });
+        let original = schema.clone();
+
+        let error = sanitize_for_kimi_parameters(&mut schema).unwrap_err();
+        let diagnostic = error.to_string();
+
+        assert_eq!(error, KimiParameterSchemaError::UnsupportedKeyword);
+        assert!(!diagnostic.contains("private-field-4921"));
+        assert!(!diagnostic.contains("private-pattern-value-7395"));
+        assert_eq!(schema, original, "failed validation must be transactional");
     }
 
     #[test]

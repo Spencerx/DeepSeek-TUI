@@ -2694,6 +2694,8 @@ mod tests {
     };
     use crate::tools::apply_patch::ApplyPatchTool;
     use crate::tools::spec::ToolSpec;
+    use crate::tools::{ToolContext, ToolRegistryBuilder};
+    use codewhale_protocol::runtime::DynamicToolSpec;
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2728,6 +2730,58 @@ mod tests {
             strict: None,
             cache_control: None,
         }
+    }
+
+    fn deferred_dynamic_request_tool() -> Tool {
+        let registry = ToolRegistryBuilder::new()
+            .with_dynamic_tools(&[DynamicToolSpec {
+                namespace: Some("capture".to_string()),
+                name: "deferred_lookup".to_string(),
+                description: "Look up a record after deferred loading".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "mode": {"type": "string", "const": "fast"},
+                        "query": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "null"}
+                            ]
+                        }
+                    },
+                    "required": ["mode"]
+                }),
+                defer_loading: true,
+            }])
+            .build(ToolContext::new(
+                std::env::temp_dir().join("codewhale-k3-deferred-capture"),
+            ));
+        registry
+            .to_api_tools()
+            .into_iter()
+            .find(|tool| tool.name == "deferred_lookup")
+            .expect("dynamic tool remains model-visible")
+    }
+
+    fn value_contains_key(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::Object(object) => {
+                object.contains_key(needle)
+                    || object
+                        .values()
+                        .any(|child| value_contains_key(child, needle))
+            }
+            Value::Array(values) => values.iter().any(|child| value_contains_key(child, needle)),
+            _ => false,
+        }
+    }
+
+    fn captured_function<'a>(body: &'a Value, name: &str) -> &'a Value {
+        body["tools"]
+            .as_array()
+            .and_then(|tools| tools.iter().find(|tool| tool["function"]["name"] == name))
+            .map(|tool| &tool["function"])
+            .unwrap_or_else(|| panic!("captured tool catalog is missing {name}: {body}"))
     }
 
     fn moonshot_request_boundary_client(
@@ -3059,6 +3113,106 @@ mod tests {
         );
     }
 
+    async fn assert_kimi_code_streams_mfjs_safe_deferred_dynamic_tool() {
+        let tool = deferred_dynamic_request_tool();
+        assert_eq!(tool.defer_loading, Some(true));
+        assert_eq!(
+            tool.input_schema["properties"]["query"]["nullable"], true,
+            "ToolRegistry must exercise the provider-neutral nullable collapse"
+        );
+        assert!(
+            tool.input_schema["properties"]["query"]
+                .get("anyOf")
+                .is_none()
+        );
+        assert_eq!(tool.input_schema["properties"]["mode"]["const"], "fast");
+
+        let mut request = k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), true);
+        request.tools = Some(vec![tool]);
+        let body = capture_moonshot_chat_request_body(
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            request,
+        )
+        .await;
+
+        assert_eq!(
+            body["stream"], true,
+            "this must exercise the SSE path: {body}"
+        );
+        let parameters = &captured_function(&body, "deferred_lookup")["parameters"];
+        assert_eq!(parameters["properties"]["mode"]["enum"], json!(["fast"]));
+        assert!(
+            parameters["properties"]["mode"].get("const").is_none(),
+            "{parameters}"
+        );
+        assert_eq!(
+            parameters["properties"]["query"]["anyOf"],
+            json!([{"type": "string"}, {"type": "null"}])
+        );
+        assert!(
+            parameters["properties"]["query"].get("nullable").is_none(),
+            "{parameters}"
+        );
+        crate::tools::schema_sanitize::validate_mfjs_parameters(parameters).unwrap();
+    }
+
+    async fn assert_kimi_code_captures_exact_general_child_catalog() {
+        let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
+        let source_len = tools.len();
+        assert!(source_len > 20, "expected a real General child catalog");
+
+        // Name the offending first-party tool in test-only diagnostics while
+        // production errors remain fixed and non-secret.
+        for tool in &tools {
+            let mut parameters = tool.input_schema.clone();
+            crate::tools::schema_sanitize::sanitize_for_kimi_parameters(&mut parameters)
+                .unwrap_or_else(|error| panic!("General child tool {}: {error}", tool.name));
+        }
+
+        let mut request = k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), false);
+        request.tools = Some(tools);
+        let body = capture_moonshot_chat_request_body(
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            request,
+        )
+        .await;
+
+        let captured = body["tools"].as_array().expect("captured tool catalog");
+        assert_eq!(captured.len(), source_len);
+        assert!(captured_function(&body, "get_goal").is_object());
+        assert!(
+            captured
+                .iter()
+                .all(|tool| tool["function"]["name"] != "create_goal")
+        );
+        assert!(
+            captured
+                .iter()
+                .all(|tool| tool["function"]["name"] != "update_goal")
+        );
+
+        for tool in captured {
+            let parameters = &tool["function"]["parameters"];
+            for unsupported in ["const", "nullable", "oneOf", "allOf"] {
+                assert!(
+                    !value_contains_key(parameters, unsupported),
+                    "captured {} still contains {unsupported}: {parameters}",
+                    tool["function"]["name"]
+                );
+            }
+            crate::tools::schema_sanitize::validate_mfjs_parameters(parameters).unwrap();
+        }
+
+        let handle_read = &captured_function(&body, "handle_read")["parameters"];
+        assert!(
+            handle_read.to_string().contains("var_handle"),
+            "real nested const fixture must survive as an enum: {handle_read}"
+        );
+        assert!(value_contains_key(handle_read, "enum"), "{handle_read}");
+    }
+
     #[tokio::test]
     async fn create_message_request_json_honors_exact_k3_route_boundaries() {
         assert_k3_request_json_route_boundaries(false).await;
@@ -3097,6 +3251,16 @@ mod tests {
     #[tokio::test]
     async fn create_message_stream_rejects_invalid_kimi_root_ref_before_transport() {
         assert_kimi_code_invalid_root_ref_fails_before_transport(true).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_stream_sends_mfjs_safe_deferred_dynamic_tool() {
+        assert_kimi_code_streams_mfjs_safe_deferred_dynamic_tool().await;
+    }
+
+    #[tokio::test]
+    async fn create_message_captures_exact_mfjs_safe_general_child_catalog() {
+        assert_kimi_code_captures_exact_general_child_catalog().await;
     }
 
     const CONFIG_SECRET_SENTINELS: [&str; 8] = [
