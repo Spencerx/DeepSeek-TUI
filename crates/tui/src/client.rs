@@ -937,6 +937,17 @@ fn build_default_headers(
         }
         headers.insert(header_name, HeaderValue::from_str(value)?);
     }
+    // Billing provenance: tag every request so the backend can attribute
+    // usage to the correct client version and provider (#4324).
+    let provenance = format!(
+        "codewhale/{}; provider={}",
+        env!("CARGO_PKG_VERSION"),
+        api_provider.as_str()
+    );
+    headers.insert(
+        HeaderName::from_static("x-codewhale-provenance"),
+        HeaderValue::from_str(&provenance)?,
+    );
     Ok(headers)
 }
 
