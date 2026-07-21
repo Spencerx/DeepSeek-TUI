@@ -392,7 +392,10 @@ impl ModelPickerView {
             rows.sort_by(|a, b| {
                 let rank = |row: &ModelPickerRow| {
                     let provider_matches = row.provider.is_some_and(|provider| {
-                        provider.as_str().to_ascii_lowercase().contains(&query_lower)
+                        provider
+                            .as_str()
+                            .to_ascii_lowercase()
+                            .contains(&query_lower)
                             || provider
                                 .display_name()
                                 .to_ascii_lowercase()
@@ -406,13 +409,12 @@ impl ModelPickerView {
                     } else {
                         2
                     };
-                    let provider_rank = if row.provider.is_none()
-                        || row.provider == Some(initial_provider)
-                    {
-                        0
-                    } else {
-                        1
-                    };
+                    let provider_rank =
+                        if row.provider.is_none() || row.provider == Some(initial_provider) {
+                            0
+                        } else {
+                            1
+                        };
                     (
                         if provider_matches { 0 } else { 1 },
                         id_rank,

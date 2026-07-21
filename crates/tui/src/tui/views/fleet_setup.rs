@@ -1014,10 +1014,7 @@ impl ModalView for FleetSetupView {
                     .iter()
                     .map(|idx| self.model_choices[*idx].clone())
                     .collect();
-                let selected = self
-                    .model_idx
-                    .min(filtered.len().saturating_sub(1))
-                    .max(0);
+                let selected = self.model_idx.min(filtered.len().saturating_sub(1)).max(0);
                 let filter_line = if self.model_filter_active {
                     format!("Filter: {}▏ (Enter keep · Esc clear)", self.model_query)
                 } else if !self.model_query.trim().is_empty() {
@@ -1028,7 +1025,10 @@ impl ModalView for FleetSetupView {
                         self.model_choices.len()
                     )
                 } else {
-                    format!("Type / to filter {} routes by provider or model", self.model_choices.len())
+                    format!(
+                        "Type / to filter {} routes by provider or model",
+                        self.model_choices.len()
+                    )
                 };
                 render_choice_step(
                     chunks[1],
@@ -1686,7 +1686,10 @@ mod tests {
         }
         assert_eq!(view.step_len(), 1, "only the glm row survives the filter");
         let route = view.selected_route().expect("filtered selection resolves");
-        assert_eq!(route, ("openrouter".to_string(), "z-ai/glm-5-turbo".to_string()));
+        assert_eq!(
+            route,
+            ("openrouter".to_string(), "z-ai/glm-5-turbo".to_string())
+        );
 
         // Provider substring filters too.
         view.handle_key(key(KeyCode::Esc));
@@ -1695,7 +1698,11 @@ mod tests {
             view.handle_key(key(KeyCode::Char(ch)));
         }
         // inherit's route IS the active DeepSeek route, so it matches too.
-        assert_eq!(view.step_len(), 3, "deepseek rows plus the inherit (active deepseek route) match");
+        assert_eq!(
+            view.step_len(),
+            3,
+            "deepseek rows plus the inherit (active deepseek route) match"
+        );
 
         // Enter keeps the filter but releases the input; Esc in filter clears.
         view.handle_key(key(KeyCode::Enter));
@@ -1703,7 +1710,11 @@ mod tests {
         assert_eq!(view.step_len(), 3);
         view.handle_key(key(KeyCode::Char('/')));
         view.handle_key(key(KeyCode::Esc));
-        assert_eq!(view.step_len(), full_len, "clearing restores the full catalog");
+        assert_eq!(
+            view.step_len(),
+            full_len,
+            "clearing restores the full catalog"
+        );
     }
 
     #[test]

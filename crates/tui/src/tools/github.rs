@@ -79,21 +79,22 @@ impl GithubTool {
     }
 
     fn allowed_actions(&self) -> &'static [&'static str] {
-        if self.read_only { READ_ACTIONS } else { ALL_ACTIONS }
+        if self.read_only {
+            READ_ACTIONS
+        } else {
+            ALL_ACTIONS
+        }
     }
 
     fn resolve_action<'a>(&'a self, input: &'a Value) -> Result<&'a str, ToolError> {
         let action = match self.forced_action {
             Some(action) => action,
-            None => input
-                .get("action")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    ToolError::invalid_input(format!(
-                        "github: missing `action` (one of: {})",
-                        self.allowed_actions().join(", ")
-                    ))
-                })?,
+            None => input.get("action").and_then(Value::as_str).ok_or_else(|| {
+                ToolError::invalid_input(format!(
+                    "github: missing `action` (one of: {})",
+                    self.allowed_actions().join(", ")
+                ))
+            })?,
         };
         if self.allowed_actions().contains(&action) {
             Ok(action)
@@ -122,13 +123,27 @@ impl ToolSpec for GithubTool {
 
     fn description(&self) -> &'static str {
         match self.forced_action {
-            Some("issue_context") => "Read GitHub issue context using gh. Read-only: body/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active.",
-            Some("pr_context") => "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. Read-only; no push/merge/close.",
-            Some("comment") => "Post an evidence-backed GitHub issue/PR comment with gh. Requires approval. Use blocker comments for partial work; do not claim closure without evidence.",
-            Some("close_issue") => "Close a GitHub issue only when structured acceptance evidence is present and approved. For pull requests use github_close_pr; do not call PRs issues in user-facing output. Never close merely because the agent is stopping.",
-            Some("close_pr") => "Close a GitHub pull request only when structured acceptance evidence is present and approved. Use this for PRs instead of github_close_issue so the UI, audit trail, and comments keep PR wording clear.",
-            _ if self.read_only => "Read GitHub issue/PR context using gh. Actions: \"issue_context\" and \"pr_context\"; bodies/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active.",
-            _ => "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; large bodies become task artifacts when a durable task is active), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping). No push/merge.",
+            Some("issue_context") => {
+                "Read GitHub issue context using gh. Read-only: body/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active."
+            }
+            Some("pr_context") => {
+                "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. Read-only; no push/merge/close."
+            }
+            Some("comment") => {
+                "Post an evidence-backed GitHub issue/PR comment with gh. Requires approval. Use blocker comments for partial work; do not claim closure without evidence."
+            }
+            Some("close_issue") => {
+                "Close a GitHub issue only when structured acceptance evidence is present and approved. For pull requests use github_close_pr; do not call PRs issues in user-facing output. Never close merely because the agent is stopping."
+            }
+            Some("close_pr") => {
+                "Close a GitHub pull request only when structured acceptance evidence is present and approved. Use this for PRs instead of github_close_issue so the UI, audit trail, and comments keep PR wording clear."
+            }
+            _ if self.read_only => {
+                "Read GitHub issue/PR context using gh. Actions: \"issue_context\" and \"pr_context\"; bodies/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active."
+            }
+            _ => {
+                "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; large bodies become task artifacts when a durable task is active), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping). No push/merge."
+            }
         }
     }
 
@@ -209,15 +224,9 @@ impl ToolSpec for GithubTool {
             Some(action) if Self::action_is_read(action) => {
                 vec![ToolCapability::ReadOnly, ToolCapability::Network]
             }
-            Some(_) => vec![
-                ToolCapability::Network,
-                ToolCapability::RequiresApproval,
-            ],
+            Some(_) => vec![ToolCapability::Network, ToolCapability::RequiresApproval],
             None if self.read_only => vec![ToolCapability::ReadOnly, ToolCapability::Network],
-            None => vec![
-                ToolCapability::Network,
-                ToolCapability::RequiresApproval,
-            ],
+            None => vec![ToolCapability::Network, ToolCapability::RequiresApproval],
         }
     }
 
@@ -858,7 +867,13 @@ mod tests {
                 "canonical schema must offer action {action}"
             );
         }
-        for field in ["number", "target", "body", "evidence", "acceptance_criteria"] {
+        for field in [
+            "number",
+            "target",
+            "body",
+            "evidence",
+            "acceptance_criteria",
+        ] {
             assert!(
                 schema["properties"][field].is_object(),
                 "canonical schema must carry union field {field}"
@@ -885,12 +900,11 @@ mod tests {
         let comment = GithubTool::alias("github_comment", "comment");
         assert!(!comment.model_visible());
         assert_eq!(comment.name(), "github_comment");
-        assert_eq!(comment.approval_requirement(), ApprovalRequirement::Required);
-        assert!(
-            comment
-                .capabilities()
-                .contains(&ToolCapability::Network)
+        assert_eq!(
+            comment.approval_requirement(),
+            ApprovalRequirement::Required
         );
+        assert!(comment.capabilities().contains(&ToolCapability::Network));
 
         let issue = GithubTool::alias("github_issue_context", "issue_context");
         assert_eq!(issue.approval_requirement(), ApprovalRequirement::Auto);

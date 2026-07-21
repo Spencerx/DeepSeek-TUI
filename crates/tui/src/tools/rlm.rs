@@ -75,15 +75,12 @@ impl RlmTool {
     fn resolve_action<'a>(&'a self, input: &'a Value) -> Result<&'a str, ToolError> {
         let action = match self.forced_action {
             Some(action) => action,
-            None => input
-                .get("action")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    ToolError::invalid_input(format!(
-                        "rlm: missing `action` (one of: {})",
-                        ALL_ACTIONS.join(", ")
-                    ))
-                })?,
+            None => input.get("action").and_then(Value::as_str).ok_or_else(|| {
+                ToolError::invalid_input(format!(
+                    "rlm: missing `action` (one of: {})",
+                    ALL_ACTIONS.join(", ")
+                ))
+            })?,
         };
         if ALL_ACTIONS.contains(&action) {
             Ok(action)
@@ -258,9 +255,7 @@ impl ToolSpec for RlmTool {
 
     fn approval_requirement(&self) -> ApprovalRequirement {
         match self.forced_action {
-            Some(action) if Self::action_requires_approval(action) => {
-                ApprovalRequirement::Required
-            }
+            Some(action) if Self::action_requires_approval(action) => ApprovalRequirement::Required,
             Some(_) => ApprovalRequirement::Auto,
             None => ApprovalRequirement::Required,
         }
@@ -268,9 +263,7 @@ impl ToolSpec for RlmTool {
 
     fn approval_requirement_for(&self, input: &Value) -> ApprovalRequirement {
         match self.resolve_action(input) {
-            Ok(action) if Self::action_requires_approval(action) => {
-                ApprovalRequirement::Required
-            }
+            Ok(action) if Self::action_requires_approval(action) => ApprovalRequirement::Required,
             Ok(_) => ApprovalRequirement::Auto,
             Err(_) => self.approval_requirement(),
         }
@@ -862,7 +855,10 @@ mod tests {
             RlmTool::alias("rlm_configure", "configure", None).name(),
             "rlm_configure"
         );
-        assert_eq!(RlmTool::alias("rlm_close", "close", None).name(), "rlm_close");
+        assert_eq!(
+            RlmTool::alias("rlm_close", "close", None).name(),
+            "rlm_close"
+        );
     }
 
     #[test]

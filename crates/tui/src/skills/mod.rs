@@ -1107,7 +1107,9 @@ fn privacy_safe_skill_path(path: &Path, workspace: &Path) -> String {
         return format!("~/{}", rel.display());
     }
     match (path.parent().and_then(Path::file_name), path.file_name()) {
-        (Some(dir), Some(file)) => format!("…/{}/{}", dir.to_string_lossy(), file.to_string_lossy()),
+        (Some(dir), Some(file)) => {
+            format!("…/{}/{}", dir.to_string_lossy(), file.to_string_lossy())
+        }
         _ => path
             .file_name()
             .map(|file| file.to_string_lossy().into_owned())

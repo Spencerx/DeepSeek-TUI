@@ -117,9 +117,7 @@ impl PublicRole {
                 Some(Self::Worker)
             }
             "reviewer" | "review" | "code-review" | "code_review" => Some(Self::Reviewer),
-            "verifier" | "verify" | "verification" | "validator" | "tester" => {
-                Some(Self::Verifier)
-            }
+            "verifier" | "verify" | "verification" | "validator" | "tester" => Some(Self::Verifier),
             _ => None,
         }
     }

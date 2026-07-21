@@ -2553,11 +2553,17 @@ pub struct BashTool {
 
 impl BashTool {
     pub const fn new(name: &'static str) -> Self {
-        Self { name, forced_action: None }
+        Self {
+            name,
+            forced_action: None,
+        }
     }
 
     pub const fn alias(name: &'static str, action: &'static str) -> Self {
-        Self { name, forced_action: Some(action) }
+        Self {
+            name,
+            forced_action: Some(action),
+        }
     }
 }
 
@@ -3534,8 +3540,6 @@ fn shell_delta_with_accumulated_output(
         stderr_total_len,
     }
 }
-
-
 
 /// Tool for appending notes to a notes file.
 pub struct NoteTool;

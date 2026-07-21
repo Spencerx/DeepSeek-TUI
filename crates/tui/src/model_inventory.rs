@@ -157,20 +157,23 @@ impl ModelInventory {
             .and_then(|auto| auto.router.as_ref())
             .and_then(|router| {
                 let provider = router.provider.as_deref().and_then(ApiProvider::parse)?;
-                let model = router.model.as_deref().map(str::trim).filter(|m| !m.is_empty())?;
+                let model = router
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())?;
                 Some((
                     provider,
                     model.to_string(),
-                    router.thinking.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string),
+                    router
+                        .thinking
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_string),
                 ))
             })
-            .unwrap_or_else(|| {
-                (
-                    ApiProvider::Deepseek,
-                    "deepseek-v4-flash".to_string(),
-                    None,
-                )
-            });
+            .unwrap_or_else(|| (ApiProvider::Deepseek, "deepseek-v4-flash".to_string(), None));
 
         Self {
             active_provider,

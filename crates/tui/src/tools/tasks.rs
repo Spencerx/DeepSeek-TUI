@@ -107,21 +107,22 @@ impl TasksTool {
     }
 
     fn allowed_actions(&self) -> &'static [&'static str] {
-        if self.read_only { READ_ACTIONS } else { ALL_ACTIONS }
+        if self.read_only {
+            READ_ACTIONS
+        } else {
+            ALL_ACTIONS
+        }
     }
 
     fn resolve_action<'a>(&'a self, input: &'a Value) -> Result<&'a str, ToolError> {
         let action = match self.forced_action {
             Some(action) => action,
-            None => input
-                .get("action")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    ToolError::invalid_input(format!(
-                        "tasks: missing `action` (one of: {})",
-                        self.allowed_actions().join(", ")
-                    ))
-                })?,
+            None => input.get("action").and_then(Value::as_str).ok_or_else(|| {
+                ToolError::invalid_input(format!(
+                    "tasks: missing `action` (one of: {})",
+                    self.allowed_actions().join(", ")
+                ))
+            })?,
         };
         if self.allowed_actions().contains(&action) {
             Ok(action)
@@ -160,19 +161,37 @@ impl ToolSpec for TasksTool {
 
     fn description(&self) -> &'static str {
         match self.forced_action {
-            Some("create") => "Create/enqueue a durable background task through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents.",
+            Some("create") => {
+                "Create/enqueue a durable background task through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents."
+            }
             Some("list") => {
                 "List recent durable tasks with status, linked thread/turn ids, and concise summaries."
             }
-            Some("read") => "Read durable task detail including timeline, checklist, gate evidence, artifacts, and PR attempts.",
-            Some("cancel") => "Cancel a queued or running durable task through TaskManager. Requires approval because it changes work state.",
-            Some("gate_run") => "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task.",
-            Some("pr_attempt_record") => "Capture current git diff as a durable PR work attempt with patch artifact, changed files, and verification notes.",
+            Some("read") => {
+                "Read durable task detail including timeline, checklist, gate evidence, artifacts, and PR attempts."
+            }
+            Some("cancel") => {
+                "Cancel a queued or running durable task through TaskManager. Requires approval because it changes work state."
+            }
+            Some("gate_run") => {
+                "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task."
+            }
+            Some("pr_attempt_record") => {
+                "Capture current git diff as a durable PR work attempt with patch artifact, changed files, and verification notes."
+            }
             Some("pr_attempt_list") => "List PR attempts recorded on a durable task.",
-            Some("pr_attempt_read") => "Read one recorded PR attempt and its patch artifact reference.",
-            Some("pr_attempt_preflight") => "Run `git apply --check` for a recorded attempt patch. This is a no-mutation preflight; actual apply remains explicit and approval-gated elsewhere.",
-            _ if self.read_only => "Inspect durable tasks and their PR attempts. Actions: \"list\", \"read\", \"pr_attempt_list\", \"pr_attempt_read\".",
-            _ => "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\", \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\". Use task_shell_start for long-running shell work.",
+            Some("pr_attempt_read") => {
+                "Read one recorded PR attempt and its patch artifact reference."
+            }
+            Some("pr_attempt_preflight") => {
+                "Run `git apply --check` for a recorded attempt patch. This is a no-mutation preflight; actual apply remains explicit and approval-gated elsewhere."
+            }
+            _ if self.read_only => {
+                "Inspect durable tasks and their PR attempts. Actions: \"list\", \"read\", \"pr_attempt_list\", \"pr_attempt_read\"."
+            }
+            _ => {
+                "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\", \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\". Use task_shell_start for long-running shell work."
+            }
         }
     }
 
@@ -299,9 +318,7 @@ impl ToolSpec for TasksTool {
 
     fn approval_requirement(&self) -> ApprovalRequirement {
         match self.forced_action {
-            Some(action) if Self::action_requires_approval(action) => {
-                ApprovalRequirement::Required
-            }
+            Some(action) if Self::action_requires_approval(action) => ApprovalRequirement::Required,
             Some(_) => ApprovalRequirement::Auto,
             None if self.read_only => ApprovalRequirement::Auto,
             None => ApprovalRequirement::Required,
@@ -310,9 +327,7 @@ impl ToolSpec for TasksTool {
 
     fn approval_requirement_for(&self, input: &Value) -> ApprovalRequirement {
         match self.resolve_action(input) {
-            Ok(action) if Self::action_requires_approval(action) => {
-                ApprovalRequirement::Required
-            }
+            Ok(action) if Self::action_requires_approval(action) => ApprovalRequirement::Required,
             Ok(_) => ApprovalRequirement::Auto,
             Err(_) => self.approval_requirement(),
         }
@@ -569,8 +584,8 @@ impl TasksTool {
     ) -> Result<ToolResult, ToolError> {
         let gate = required_str(input, "gate")?.to_string();
         let command = required_str(input, "command")?.to_string();
-        let timeout_ms =
-            optional_u64(input, "timeout_ms", DEFAULT_GATE_TIMEOUT_MS).clamp(1_000, MAX_GATE_TIMEOUT_MS);
+        let timeout_ms = optional_u64(input, "timeout_ms", DEFAULT_GATE_TIMEOUT_MS)
+            .clamp(1_000, MAX_GATE_TIMEOUT_MS);
         let cwd = resolve_cwd(context, optional_str(input, "cwd"))?;
 
         let safety = analyze_command(&command);
@@ -1295,7 +1310,14 @@ mod tests {
                 "canonical schema must offer action {action}"
             );
         }
-        for field in ["prompt", "task_id", "gate", "command", "attempt_id", "limit"] {
+        for field in [
+            "prompt",
+            "task_id",
+            "gate",
+            "command",
+            "attempt_id",
+            "limit",
+        ] {
             assert!(
                 schema["properties"][field].is_object(),
                 "canonical schema must carry union field {field}"
@@ -1332,10 +1354,7 @@ mod tests {
 
         let gate = TasksTool::alias("task_gate_run", "gate_run");
         assert_eq!(gate.approval_requirement(), ApprovalRequirement::Required);
-        assert!(
-            gate.capabilities()
-                .contains(&ToolCapability::ExecutesCode)
-        );
+        assert!(gate.capabilities().contains(&ToolCapability::ExecutesCode));
 
         let list = TasksTool::alias("task_list", "list");
         assert_eq!(list.approval_requirement(), ApprovalRequirement::Auto);

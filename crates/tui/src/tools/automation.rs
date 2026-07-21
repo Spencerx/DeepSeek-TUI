@@ -63,21 +63,22 @@ impl AutomationTool {
     }
 
     fn allowed_actions(&self) -> &'static [&'static str] {
-        if self.read_only { READ_ACTIONS } else { ALL_ACTIONS }
+        if self.read_only {
+            READ_ACTIONS
+        } else {
+            ALL_ACTIONS
+        }
     }
 
     fn resolve_action<'a>(&'a self, input: &'a Value) -> Result<&'a str, ToolError> {
         let action = match self.forced_action {
             Some(action) => action,
-            None => input
-                .get("action")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    ToolError::invalid_input(format!(
-                        "automation: missing `action` (one of: {})",
-                        self.allowed_actions().join(", ")
-                    ))
-                })?,
+            None => input.get("action").and_then(Value::as_str).ok_or_else(|| {
+                ToolError::invalid_input(format!(
+                    "automation: missing `action` (one of: {})",
+                    self.allowed_actions().join(", ")
+                ))
+            })?,
         };
         if self.allowed_actions().contains(&action) {
             Ok(action)
@@ -106,20 +107,28 @@ impl ToolSpec for AutomationTool {
 
     fn description(&self) -> &'static str {
         match self.forced_action {
-            Some("create") => "Create a durable scheduled automation. Creation requires approval and recurrence is constrained to supported HOURLY/WEEKLY RRULE forms. Runs enqueue normal durable tasks.",
+            Some("create") => {
+                "Create a durable scheduled automation. Creation requires approval and recurrence is constrained to supported HOURLY/WEEKLY RRULE forms. Runs enqueue normal durable tasks."
+            }
             Some("list") => {
                 "List durable automations with status, next run, and last run timestamps."
             }
             Some("read") => "Read one durable automation plus recent run records.",
-            Some("update") => "Update a durable automation. Requires approval; recurrence remains constrained to supported RRULE forms.",
+            Some("update") => {
+                "Update a durable automation. Requires approval; recurrence remains constrained to supported RRULE forms."
+            }
             Some("pause") => "Pause a durable automation. Requires approval.",
             Some("resume") => "Resume a paused durable automation. Requires approval.",
-            Some("delete") => {
-                "Delete a durable automation and its run history. Requires approval."
+            Some("delete") => "Delete a durable automation and its run history. Requires approval.",
+            Some("run") => {
+                "Run an automation now. The run enqueues a normal durable task and returns linked task/thread/turn ids as they become available."
             }
-            Some("run") => "Run an automation now. The run enqueues a normal durable task and returns linked task/thread/turn ids as they become available.",
-            _ if self.read_only => "Inspect durable scheduled automations. Actions: \"list\" (status, next run, last run) and \"read\" (one automation plus recent run records).",
-            _ => "Manage durable scheduled automations. Actions: \"create\" (approval; recurrence constrained to supported HOURLY/WEEKLY RRULE forms; runs enqueue normal durable tasks), \"list\", \"read\", \"update\" (approval), \"pause\" (approval), \"resume\" (approval), \"delete\" (approval), \"run\" (approval).",
+            _ if self.read_only => {
+                "Inspect durable scheduled automations. Actions: \"list\" (status, next run, last run) and \"read\" (one automation plus recent run records)."
+            }
+            _ => {
+                "Manage durable scheduled automations. Actions: \"create\" (approval; recurrence constrained to supported HOURLY/WEEKLY RRULE forms; runs enqueue normal durable tasks), \"list\", \"read\", \"update\" (approval), \"pause\" (approval), \"resume\" (approval), \"delete\" (approval), \"run\" (approval)."
+            }
         }
     }
 
@@ -409,13 +418,9 @@ impl AutomationTool {
             .ok_or_else(|| ToolError::not_available("TaskManager is not attached"))?;
         // run_now_shared handles its own lock phases so the manager mutex is
         // never held across the task-manager await.
-        let run = run_now_shared(
-            manager,
-            required_str(input, "automation_id")?,
-            task_manager,
-        )
-        .await
-        .map_err(|e| ToolError::execution_failed(e.to_string()))?;
+        let run = run_now_shared(manager, required_str(input, "automation_id")?, task_manager)
+            .await
+            .map_err(|e| ToolError::execution_failed(e.to_string()))?;
         ToolResult::json(&run).map_err(|e| ToolError::execution_failed(e.to_string()))
     }
 }
