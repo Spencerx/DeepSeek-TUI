@@ -1871,3 +1871,47 @@ fn issue_1691_quoted_commit_message_round_trips() {
         .collect();
     assert_eq!(got, spec.args);
 }
+
+/// When no `cwd` is provided, the shell should run in `context.workspace`,
+/// not in the ShellManager's default_workspace. This ensures sub-agents in
+/// worktrees run commands in the worktree directory rather than the parent.
+///
+/// Without the `context.workspace` default (stashed): runs in sm_dir → FAILS
+/// With the `context.workspace` default (unstashed): runs in ctx_dir → PASSES
+#[tokio::test]
+async fn default_cwd_uses_context_workspace_not_shell_manager_default() {
+    let ctx_dir = tempdir().expect("ctx tempdir");
+    let sm_dir = tempdir().expect("sm tempdir");
+
+    // Create distinct dirs — write a marker in each so we can tell them apart.
+    std::fs::write(ctx_dir.path().join("I_AM_CTX_DIR"), "").unwrap();
+    std::fs::write(sm_dir.path().join("I_AM_SM_DIR"), "").unwrap();
+
+    // ToolContext whose workspace is ctx_dir...
+    let ctx = ToolContext::new(ctx_dir.path())
+        // ...but whose ShellManager's default_workspace is sm_dir.
+        .with_shell_manager(new_shared_shell_manager(sm_dir.path().to_path_buf()));
+
+    // Assert directory identity through marker files instead of comparing the
+    // shell's printed path. PowerShell and `canonicalize` can spell the same
+    // Windows path differently (for example, with a verbatim-path prefix).
+    let command = if cfg!(windows) {
+        "if (Test-Path -LiteralPath 'I_AM_CTX_DIR') { Write-Output 'context-workspace' } elseif (Test-Path -LiteralPath 'I_AM_SM_DIR') { Write-Output 'manager-workspace' } else { Write-Output 'missing-workspace' }"
+    } else {
+        "if [ -f I_AM_CTX_DIR ]; then printf 'context-workspace'; elif [ -f I_AM_SM_DIR ]; then printf 'manager-workspace'; else printf 'missing-workspace'; fi"
+    };
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": command}), &ctx)
+        .await
+        .expect("shell execute");
+    assert!(result.success, "command failed: {:?}", result.content);
+
+    assert!(
+        result
+            .content
+            .lines()
+            .any(|line| line.trim() == "context-workspace"),
+        "expected context.workspace marker, but shell reported: {:?}",
+        result.content
+    );
+}
