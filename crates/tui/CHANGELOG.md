@@ -43,6 +43,16 @@ restart recovery, and the community site's content boundaries.
   role vocabulary with alias parser and `SubAgentType` mapping (#3934).
 - `load_skill` tool now supports listing: omit `name` or pass `"list"` to
   see all available skills without loading one (#4651).
+- Runtime API provider registry and atomic provider-switch endpoints
+  (`GET /v1/providers`, `GET /v1/providers/{id}/models`,
+  `POST /v1/providers/{id}/switch`) so the web GUI renders a dynamic
+  provider/model picker without the setConfig+reload clobber (#4658).
+- Typed filter (`/`) in the Fleet setup wizard's Model step: substring
+  match over provider id, display label, and model id keeps
+  OpenRouter-scale catalogs navigable (#4639).
+- `[auto.router]` config: explicit provider/model/thinking for the Auto
+  mode classifier route; unset keeps the DeepSeek flash default, and
+  missing credentials fall back to the local heuristic.
 
 ### Changed
 
@@ -56,6 +66,13 @@ restart recovery, and the community site's content boundaries.
   and restore across sessions (#4628).
 - Billing provenance: every outgoing API request carries an
   `x-codewhale-provenance` header with client version and provider (#4324).
+- The `/model` picker's typed search now ranks results: provider-name
+  matches first (drill-down), then exact id, then id-prefix, then the
+  active provider's rows (#4639).
+- System prompt text consolidated into a single `prompts/text.rs`
+  module (byte-exact constants replacing 17 layered files);
+  composition order, constitution-first binding, and locale/personality
+  variants unchanged.
 
 ### Fixed
 
@@ -176,6 +193,18 @@ restart recovery, and the community site's content boundaries.
   guards absolute paths, API keys, and workspace paths in the prefix (#4632).
 - Mode/permission baseline unit tests no longer read the developer's live
   `settings.toml`; they isolate config I/O to a temp directory (#4628).
+- Enter no longer freezes the composer on send: dispatch splits into a
+  sync prepare phase (instant history + spinner) and a spawned async
+  phase (auto-route, preflight, engine send), with submits gated while
+  a dispatch is in flight (#4605).
+- Self-hosted routes keep explicit per-model output limits for unknown
+  wire aliases instead of the generic 4K fallback (#4655).
+- Chat Completions idle-timeout errors now include received-byte and
+  timing telemetry, distinguishing prefill stalls from mid-stream
+  stalls with truncated tool-call arguments.
+- `set_config` provider writes now keep the in-memory route in step,
+  so a following model write lands in the new provider's table instead
+  of clobbering the previous provider's root default_text_model (#4658).
 
 ### Security
 
