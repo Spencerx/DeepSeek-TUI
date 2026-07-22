@@ -30,7 +30,9 @@ mod tests {
         AgentCurrentActivity, AgentCurrentActivityStatus, App, SidebarRowAction, ToolDetailRecord,
         TuiOptions,
     };
-    use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus};
+    use crate::tui::history::{
+        FileMutationReceipt, GenericToolCell, HistoryCell, PatchSummaryCell, ToolCell, ToolStatus,
+    };
     use crate::work_graph::{
         AcceptanceRequirement, ChangeCtx, EdgeKind, EvidenceKindTag, NodeKind, NodeState,
         OperationBinding, OperationOwnerSnapshot, OwnerState, Provenance, WorkEdge, WorkEdgeId,
@@ -672,6 +674,47 @@ mod tests {
         assert!(hover.is_truncated);
         assert!(hover.full_text.contains("deliberately long graph-owned"));
         assert!(hover.stop_action.is_none());
+    }
+
+    #[test]
+    fn narrow_file_activity_prioritizes_the_canonical_aggregate_label() {
+        let mut app = app();
+        app.workspace = PathBuf::from("/workspace/project");
+        let result = crate::tools::spec::ToolResult::success("ok").with_metadata(
+            serde_json::json!({
+                "mutation": {
+                    "diff": "--- a/update.rs\n+++ b/update.rs\n@@ -1 +1 @@\n-old\n+new\n--- /dev/null\n+++ b/create.rs\n@@ -0,0 +1 @@\n+created\n--- a/delete.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-deleted\n",
+                    "files": [
+                        { "path": "update.rs", "outcome": "updated" },
+                        { "path": "create.rs", "outcome": "created" },
+                        { "path": "delete.rs", "outcome": "deleted" }
+                    ],
+                    "renames": [{ "from": "old.rs", "to": "new.rs" }]
+                }
+            }),
+        );
+        let receipt = FileMutationReceipt::from_success(&app.workspace, &result).expect("receipt");
+        app.add_message(HistoryCell::Tool(ToolCell::PatchSummary(
+            PatchSummaryCell {
+                path: "4 files".to_string(),
+                summary: "ok".to_string(),
+                status: ToolStatus::Success,
+                error: None,
+                receipt: Some(receipt),
+            },
+        )));
+        app.tool_details_by_cell.insert(
+            0,
+            ToolDetailRecord {
+                tool_id: "file-multi".to_string(),
+                tool_name: "File".to_string(),
+                input: serde_json::json!({"action": "patch"}),
+                output: Some("ok".to_string()),
+            },
+        );
+
+        let text = render_text(&mut app, 80, 6);
+        assert!(text.contains("Wrote 4 files"), "{text}");
     }
 
     #[test]

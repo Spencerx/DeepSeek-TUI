@@ -4,10 +4,13 @@ use std::path::{Component, Path};
 
 use ratatui::layout::Rect;
 
+use crate::settings::InlineDiffMode;
 use crate::tools::canonical_action::canonical_action_alias;
 use crate::tools::subagent::{AgentWorkerStatus, SubAgentStatus};
 use crate::tui::app::{AgentCurrentActivityStatus, App, SidebarRowAction};
-use crate::tui::history::{FileActivityKind, FileActivitySummary, HistoryCell};
+use crate::tui::history::{
+    FileActivityKind, FileActivitySummary, FileMutationReceipt, HistoryCell, ToolCell,
+};
 use crate::work_graph::{
     AcceptanceRequirement, EdgeKind, EvidenceKind, EvidenceKindTag, NodeKind, NodeState,
     OperationBinding, OwnerState, Provenance, WorkGraphSnapshot, WorkNode,
@@ -281,6 +284,8 @@ struct SettledFileActivity {
     list: Vec<String>,
     search: Vec<String>,
     write: Vec<String>,
+    mutations: Vec<FileMutationReceipt>,
+    inline_diff_mode: InlineDiffMode,
 }
 
 impl SettledFileActivity {
@@ -613,7 +618,10 @@ const fn agent_mark(bucket: WorkBucket) -> &'static str {
 }
 
 fn settled_file_activity(app: &App) -> SettledFileActivity {
-    let mut activity = SettledFileActivity::default();
+    let mut activity = SettledFileActivity {
+        inline_diff_mode: app.inline_diff_mode,
+        ..SettledFileActivity::default()
+    };
     let mut seen = HashSet::new();
     for index in 0..app.virtual_cell_count() {
         let Some(HistoryCell::Tool(cell)) = app.cell_at_virtual_index(index) else {
@@ -626,13 +634,30 @@ fn settled_file_activity(app: &App) -> SettledFileActivity {
             continue;
         };
         let activity_tool_name = canonical_action_alias(&detail.tool_name, &detail.input);
-        let Some(kind) = FileActivitySummary::from_tool_name(activity_tool_name) else {
+        let kind = if matches!(cell, ToolCell::PatchSummary(_)) {
+            Some(FileActivityKind::Write)
+        } else {
+            FileActivitySummary::from_tool_name(activity_tool_name)
+        };
+        let Some(kind) = kind else {
             continue;
         };
         if !seen.insert(detail.tool_id.as_str()) {
             continue;
         }
         activity.summary.record(kind);
+        if kind == FileActivityKind::Write
+            && let ToolCell::PatchSummary(mutation) = cell
+            && let Some(receipt) = mutation.receipt.as_ref()
+        {
+            let additional_files =
+                u32::try_from(receipt.files.len().saturating_sub(1)).unwrap_or(u32::MAX);
+            activity.summary.files_written = activity
+                .summary
+                .files_written
+                .saturating_add(additional_files);
+            activity.mutations.push(receipt.clone());
+        }
         let target = activity_target(&app.workspace, activity_tool_name, &detail.input, kind);
         let details = match kind {
             FileActivityKind::Read => &mut activity.read,
@@ -652,18 +677,29 @@ fn settled_file_activity(app: &App) -> SettledFileActivity {
 
 fn activity_rows(activity: SettledFileActivity) -> Vec<RankedWorkRow> {
     let summaries = activity.summary.compact_display();
-    let details = [
-        activity.read,
-        activity.list,
-        activity.search,
-        activity.write,
+    let mutation_detail = activity.mutations.last().map(|receipt| {
+        if activity.inline_diff_mode == InlineDiffMode::Off {
+            receipt.outcome_label()
+        } else {
+            receipt.semantic_summary()
+        }
+    });
+    let mutation_body = settled_mutation_body(&activity.mutations, activity.inline_diff_mode);
+    let categories = [
+        (activity.summary.files_read, activity.read, false),
+        (activity.summary.dirs_listed, activity.list, false),
+        (activity.summary.patterns_searched, activity.search, false),
+        (activity.summary.files_written, activity.write, true),
     ];
-    summaries
+    categories
         .into_iter()
-        .zip(details)
+        .filter(|(count, _, _)| *count > 0)
+        .zip(summaries)
         .enumerate()
-        .map(|(order, (label, details))| {
-            let body = if details.is_empty() {
+        .map(|(order, ((_, details, is_write), label))| {
+            let body = if is_write && !mutation_body.is_empty() {
+                mutation_body.clone()
+            } else if details.is_empty() {
                 "No safe target detail retained".to_string()
             } else {
                 details.join("\n")
@@ -675,10 +711,12 @@ fn activity_rows(activity: SettledFileActivity) -> Vec<RankedWorkRow> {
                     id: WorkRowId(format!("activity:{order}")),
                     mark: crate::tui::glyphs::DONE,
                     label: label.clone(),
-                    detail: details
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "settled".to_string()),
+                    detail: if is_write {
+                        mutation_detail.clone().or_else(|| details.first().cloned())
+                    } else {
+                        details.first().cloned()
+                    }
+                    .unwrap_or_else(|| "settled".to_string()),
                     tone: WorkTone::Success,
                     selectable: true,
                     primary_action: Some(SidebarRowAction::InspectWork {
@@ -690,6 +728,33 @@ fn activity_rows(activity: SettledFileActivity) -> Vec<RankedWorkRow> {
             }
         })
         .collect()
+}
+
+fn settled_mutation_body(receipts: &[FileMutationReceipt], mode: InlineDiffMode) -> String {
+    let Some(receipt) = receipts.last() else {
+        return String::new();
+    };
+    let details = crate::tui::key_shortcuts::tool_details_shortcut_action_hint(
+        "exact change evidence on the matching File receipt",
+    );
+    let hint = format!("Select the matching File receipt; {details}.");
+    match mode {
+        InlineDiffMode::Off => format!("{}\n\n{hint}", receipt.outcome_label()),
+        InlineDiffMode::Summary => format!("{}\n\n{hint}", receipt.semantic_summary()),
+        InlineDiffMode::Full => {
+            let diff = receipt
+                .display_diff
+                .lines()
+                .take(40)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if diff.trim().is_empty() {
+                format!("{}\n\n{hint}", receipt.semantic_summary())
+            } else {
+                format!("{}\n\n{diff}\n\n{hint}", receipt.semantic_summary())
+            }
+        }
+    }
 }
 
 fn activity_target(
@@ -1471,5 +1536,107 @@ mod tests {
             activity.write,
             ["src/new.rs", "src/edit.rs", "src/patch.rs"]
         );
+    }
+
+    #[test]
+    fn multifile_receipt_counts_semantic_file_outcomes_in_work_label() {
+        let mut app = test_app();
+        let input = serde_json::json!({
+            "action": "patch",
+            "patch": "--- a/update.rs\n+++ b/update.rs\n@@ -1 +1 @@\n-old\n+new\n"
+        });
+        handle_tool_call_started(&mut app, "file-multi", "File", &input);
+        let result = ToolResult::success("ok").with_metadata(serde_json::json!({
+            "mutation": {
+                "diff": "diff --git a/old.rs b/new.rs\nrename from old.rs\nrename to new.rs\n--- a/update.rs\n+++ b/update.rs\n@@ -1 +1 @@\n-old\n+new\n--- /dev/null\n+++ b/create.rs\n@@ -0,0 +1 @@\n+created\n--- a/delete.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-deleted\n",
+                "files": [
+                    { "path": "update.rs", "outcome": "updated" },
+                    { "path": "create.rs", "outcome": "created" },
+                    { "path": "delete.rs", "outcome": "deleted" }
+                ],
+                "renames": [{ "from": "old.rs", "to": "new.rs" }]
+            }
+        }));
+        handle_tool_call_complete(&mut app, "file-multi", "File", &Ok(result));
+        app.flush_active_cell();
+
+        let activity = settled_file_activity(&app);
+        assert_eq!(activity.summary.files_written, 4);
+        let write_row = activity_rows(activity)
+            .into_iter()
+            .find(|row| row.row.label.starts_with("Wrote"))
+            .expect("write row");
+        assert_eq!(write_row.row.label, "Wrote 4 files");
+        assert_eq!(
+            write_row.row.detail,
+            "4 files · 1 created · 1 updated · 1 deleted · 1 renamed · +2 -2"
+        );
+    }
+
+    fn mutation_activity(mode: InlineDiffMode) -> SettledFileActivity {
+        let result = ToolResult::success("ok").with_metadata(serde_json::json!({
+            "mutation": {
+                "diff": "--- /Users/alice/private.rs\n+++ /Users/alice/private.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                "files": [{
+                    "path": "/Users/alice/private.rs",
+                    "outcome": "updated"
+                }],
+                "renames": []
+            }
+        }));
+        let receipt = FileMutationReceipt::from_success(Path::new("/workspace/project"), &result)
+            .expect("receipt");
+        SettledFileActivity {
+            summary: FileActivitySummary {
+                files_written: 1,
+                ..FileActivitySummary::default()
+            },
+            write: vec!["src/public.rs".to_string()],
+            mutations: vec![receipt],
+            inline_diff_mode: mode,
+            ..SettledFileActivity::default()
+        }
+    }
+
+    fn mutation_activity_body(mode: InlineDiffMode) -> (String, String, String) {
+        let row = activity_rows(mutation_activity(mode))
+            .into_iter()
+            .next()
+            .expect("activity row")
+            .row;
+        let SidebarRowAction::InspectWork { body, .. } =
+            row.primary_action.expect("inspect action")
+        else {
+            panic!("write row must open Work inspection")
+        };
+        (row.label, row.detail, body)
+    }
+
+    #[test]
+    fn work_mutation_rows_keep_labels_privacy_and_all_inline_modes() {
+        let (label, detail, full) = mutation_activity_body(InlineDiffMode::Full);
+        assert_eq!(label, "Wrote 1 files");
+        assert_eq!(detail, "Updated <external file> · +1 -1");
+        assert!(full.contains("-old"), "{full}");
+        assert!(full.contains("+new"), "{full}");
+        assert!(!full.contains("alice"), "{full}");
+        assert!(full.contains("exact change evidence"), "{full}");
+
+        let (_, _, summary) = mutation_activity_body(InlineDiffMode::Summary);
+        assert!(
+            summary.contains("Updated <external file> · +1 -1"),
+            "{summary}"
+        );
+        assert!(!summary.contains("-old"), "{summary}");
+        assert!(!summary.contains("+new"), "{summary}");
+        assert!(!summary.contains("alice"), "{summary}");
+
+        let (_, detail, off) = mutation_activity_body(InlineDiffMode::Off);
+        assert_eq!(detail, "Updated <external file>");
+        assert!(off.contains("Updated <external file>"), "{off}");
+        assert!(!off.contains("+1 -1"), "{off}");
+        assert!(!off.contains("-old"), "{off}");
+        assert!(!off.contains("alice"), "{off}");
+        assert!(off.contains("exact change evidence"), "{off}");
     }
 }

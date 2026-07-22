@@ -20,6 +20,7 @@ mod agent_activity;
 mod archived_context;
 mod checklist;
 mod constants;
+mod file_mutation;
 mod message;
 mod plan;
 mod thinking;
@@ -51,6 +52,7 @@ use tool_output::{render_exec_output_mode, render_tool_output_mode, wrap_plain_l
 
 #[cfg(test)]
 use agent_activity::extract_agent_id;
+pub use file_mutation::FileMutationReceipt;
 pub use plan::PlanUpdateCell;
 #[cfg(test)]
 use thinking::extract_reasoning_summary;
@@ -157,6 +159,7 @@ pub struct TranscriptRenderOptions {
     pub show_thinking: bool,
     pub verbose: bool,
     pub show_tool_details: bool,
+    pub inline_diff_mode: crate::settings::InlineDiffMode,
     pub calm_mode: bool,
     pub low_motion: bool,
     pub spacing: TranscriptSpacing,
@@ -168,6 +171,7 @@ impl Default for TranscriptRenderOptions {
             show_thinking: true,
             verbose: false,
             show_tool_details: true,
+            inline_diff_mode: crate::settings::InlineDiffMode::Full,
             calm_mode: false,
             low_motion: false,
             spacing: TranscriptSpacing::Comfortable,
@@ -286,6 +290,12 @@ impl HistoryCell {
                 *duration_secs,
                 folded ^ !options.verbose,
                 options.low_motion,
+            ),
+            HistoryCell::Tool(ToolCell::PatchSummary(cell)) => cell.render(
+                width,
+                options.low_motion,
+                RenderMode::Live,
+                options.inline_diff_mode,
             ),
             HistoryCell::Tool(cell) if !options.show_tool_details && !cell.is_failed() => {
                 let mut lines = cell.lines_with_motion(width, options.low_motion);
@@ -529,6 +539,10 @@ pub enum ToolCell {
     PlanUpdate(PlanUpdateCell),
     PatchSummary(PatchSummaryCell),
     Review(ReviewCell),
+    /// Standalone preview compatibility cell. Approval previews now live in
+    /// the modal and successful mutations use `PatchSummary`, but keeping this
+    /// renderer avoids discarding the older transcript shape outright.
+    #[allow(dead_code)]
     DiffPreview(DiffPreviewCell),
     Mcp(McpToolCell),
     ViewImage(ViewImageCell),
@@ -634,7 +648,12 @@ impl ToolCell {
             ToolCell::Exec(cell) => cell.render(width, low_motion, mode),
             ToolCell::Exploring(cell) => cell.lines_with_motion(width, low_motion),
             ToolCell::PlanUpdate(cell) => cell.lines_with_motion(width, low_motion),
-            ToolCell::PatchSummary(cell) => cell.render(width, low_motion, mode),
+            ToolCell::PatchSummary(cell) => cell.render(
+                width,
+                low_motion,
+                mode,
+                crate::settings::InlineDiffMode::Full,
+            ),
             ToolCell::Review(cell) => cell.render(width, low_motion, mode),
             ToolCell::DiffPreview(cell) => cell.lines_with_motion(width, low_motion),
             ToolCell::Mcp(cell) => cell.render(width, low_motion, mode),
@@ -945,13 +964,14 @@ pub struct ExploringEntry {
     pub status: ToolStatus,
 }
 
-/// Cell for patch summaries emitted by the patch tool.
+/// Calm outcome and exact evidence for a structured File mutation.
 #[derive(Debug, Clone)]
 pub struct PatchSummaryCell {
     pub path: String,
     pub summary: String,
     pub status: ToolStatus,
     pub error: Option<String>,
+    pub receipt: Option<FileMutationReceipt>,
 }
 
 impl PatchSummaryCell {
@@ -960,28 +980,40 @@ impl PatchSummaryCell {
         width: u16,
         low_motion: bool,
         mode: RenderMode,
+        inline_diff_mode: crate::settings::InlineDiffMode,
     ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
+        let header_summary = self
+            .receipt
+            .as_ref()
+            .map(FileMutationReceipt::outcome_label)
+            .unwrap_or_else(|| self.path.clone());
         lines.push(render_tool_header_with_summary(
-            "Patch",
-            Some(&self.path),
+            "File",
+            Some(&header_summary),
             tool_status_label(self.status),
             self.status,
             None,
             low_motion,
         ));
-        lines.extend(render_compact_kv(
-            "file",
-            &self.path,
-            tool_value_style(),
-            width,
-        ));
-        lines.extend(render_tool_output_mode(
-            &self.summary,
-            width,
-            TOOL_COMMAND_LINE_LIMIT,
-            mode,
-        ));
+        if self.status == ToolStatus::Success
+            && let Some(receipt) = self.receipt.as_ref()
+        {
+            lines.extend(receipt.render_inline(width, inline_diff_mode));
+        } else {
+            lines.extend(render_compact_kv(
+                "file",
+                &self.path,
+                tool_value_style(),
+                width,
+            ));
+            lines.extend(render_tool_output_mode(
+                &self.summary,
+                width,
+                TOOL_COMMAND_LINE_LIMIT,
+                mode,
+            ));
+        }
         if let Some(error) = self.error.as_ref() {
             lines.extend(render_tool_output_mode(
                 error,

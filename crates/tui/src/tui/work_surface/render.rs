@@ -224,21 +224,25 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         } else {
             format!("{compact_owner}{mark} ")
         };
-        let detail = if row.tone != WorkTone::Heading && content_area.width >= 44 {
+        let detail_candidate = if row.tone != WorkTone::Heading && content_area.width >= 44 {
             format!("  {}", row.detail)
         } else {
             String::new()
         };
+        let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+        let row_width = usize::from(content_area.width);
+        let label_budget = row_width.saturating_sub(prefix_width).max(1);
+        let label = truncate_line_to_width(&row.label, label_budget);
+        let detail_budget =
+            row_width.saturating_sub(prefix_width + UnicodeWidthStr::width(label.as_str()));
+        let detail = if detail_budget >= 4 {
+            truncate_line_to_width(&detail_candidate, detail_budget)
+        } else {
+            String::new()
+        };
         let detail_width = UnicodeWidthStr::width(detail.as_str());
-        let label_width = usize::from(content_area.width)
-            .saturating_sub(UnicodeWidthStr::width(prefix.as_str()) + detail_width)
-            .max(1);
-        let label = truncate_line_to_width(&row.label, label_width);
-        let gap = usize::from(content_area.width).saturating_sub(
-            UnicodeWidthStr::width(prefix.as_str())
-                + UnicodeWidthStr::width(label.as_str())
-                + detail_width,
-        );
+        let gap = usize::from(content_area.width)
+            .saturating_sub(prefix_width + UnicodeWidthStr::width(label.as_str()) + detail_width);
         let display = format!("{prefix}{label}{}{detail}", " ".repeat(gap));
         lines.push(Line::from(Span::styled(display.clone(), style)));
 
@@ -253,7 +257,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 display_text: display,
                 full_text: format!("{} · {}", row.label, row.detail),
                 detail: Some(row.detail.clone()),
-                is_truncated: label != row.label || detail.is_empty(),
+                is_truncated: label != row.label || detail != detail_candidate,
                 click_action: row.primary_action.clone(),
                 stop_action: None,
                 stop_zone_start_col: None,

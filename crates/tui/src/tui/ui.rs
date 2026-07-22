@@ -128,7 +128,6 @@ use crate::tui::subagent_routing::{
 use crate::tui::tool_routing::exploring_label;
 use crate::tui::tool_routing::{
     apply_workflow_ui_event, handle_tool_call_complete, handle_tool_call_started,
-    maybe_add_patch_preview,
 };
 use crate::tui::ui_text::history_cell_to_text;
 use crate::tui::user_input::UserInputView;
@@ -13688,12 +13687,6 @@ fn push_approval_request_view(
     approval_key: &str,
     intent_summary: Option<&str>,
 ) {
-    if crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input)
-        == "apply_patch"
-    {
-        maybe_add_patch_preview(app, tool_input);
-    }
-
     let request = ApprovalRequest::new_with_intent(
         id,
         tool_name,

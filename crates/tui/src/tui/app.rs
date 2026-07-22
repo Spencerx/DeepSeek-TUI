@@ -31,7 +31,7 @@ use crate::palette::{self, UiTheme};
 use crate::pricing::{CostCurrency, CostEstimate};
 use crate::resource_telemetry::TokenThroughput;
 use crate::session_manager::{SessionContextReference, SessionMetadata, SessionWorkState};
-use crate::settings::Settings;
+use crate::settings::{InlineDiffMode, Settings};
 use crate::tools::plan::{PlanState, SharedPlanState, new_shared_plan_state};
 use crate::tools::shell::new_shared_shell_manager;
 use crate::tools::spec::RuntimeToolServices;
@@ -2196,6 +2196,9 @@ pub struct App {
     pub show_thinking: bool,
     pub verbose_transcript: bool,
     pub show_tool_details: bool,
+    /// Inline presentation mode for successful structured File mutations.
+    /// Exact evidence remains attached to each mutation receipt in all modes.
+    pub inline_diff_mode: InlineDiffMode,
     pub ui_locale: Locale,
     pub cost_currency: CostCurrency,
     /// Route payment truth. Model pricing alone cannot distinguish metered
@@ -3076,6 +3079,7 @@ impl App {
         let status_indicator = settings.status_indicator.clone();
         let show_thinking = settings.show_thinking;
         let show_tool_details = settings.show_tool_details;
+        let inline_diff_mode = InlineDiffMode::parse(&settings.inline_diffs);
         let ui_locale = resolve_locale(&settings.locale);
         let cost_currency = match (settings.cost_currency.as_str(), ui_locale.tag()) {
             ("usd", "zh-Hans") => CostCurrency::Cny,
@@ -3479,6 +3483,7 @@ impl App {
             show_thinking,
             verbose_transcript: false,
             show_tool_details,
+            inline_diff_mode,
             ui_locale,
             cost_currency,
             billing_presentation: crate::route_billing::for_route(config, provider),
@@ -5328,6 +5333,7 @@ impl App {
             show_thinking: self.show_thinking,
             verbose: self.verbose_transcript,
             show_tool_details: self.show_tool_details,
+            inline_diff_mode: self.inline_diff_mode,
             calm_mode: self.calm_mode,
             low_motion: self.low_motion,
             spacing: self.transcript_spacing,

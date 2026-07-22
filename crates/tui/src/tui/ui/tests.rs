@@ -208,8 +208,8 @@ fn canonical_file_actions_split_reads_searches_and_mutations_truthfully() {
         ("list", "exploring"),
         ("search_name", "file_search"),
         ("search_content", "exploring"),
-        ("write", "write_file"),
-        ("edit", "edit_file"),
+        ("write", "patch_summary"),
+        ("edit", "patch_summary"),
         ("patch", "patch_summary"),
     ];
 
@@ -259,6 +259,91 @@ fn canonical_file_actions_split_reads_searches_and_mutations_truthfully() {
         }
         assert_eq!(app.active_tool_details[&id].tool_name, "File");
     }
+}
+
+#[test]
+fn canonical_file_mutations_attach_receipts_only_to_successful_outcomes() {
+    for approval_mode in [
+        ApprovalMode::Suggest,
+        ApprovalMode::Auto,
+        ApprovalMode::Bypass,
+    ] {
+        for action in ["write", "edit", "patch"] {
+            let mut app = create_test_app();
+            app.approval_mode = approval_mode;
+            let id = format!("file-{approval_mode:?}-{action}-success");
+            let input = if action == "patch" {
+                serde_json::json!({
+                    "action": action,
+                    "patch": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"
+                })
+            } else {
+                serde_json::json!({"action": action, "path": "src/lib.rs"})
+            };
+            handle_tool_call_started(&mut app, &id, "File", &input);
+            handle_tool_call_complete(
+                &mut app,
+                &id,
+                "File",
+                &Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(
+                    serde_json::json!({
+                        "mutation": {
+                            "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                            "files": [{ "path": "src/lib.rs", "outcome": "updated" }],
+                            "renames": []
+                        }
+                    }),
+                )),
+            );
+
+            let active = app.active_cell.as_ref().expect("active cell");
+            let HistoryCell::Tool(ToolCell::PatchSummary(cell)) = &active.entries()[0] else {
+                panic!("File.{action} must stay on the calm File receipt path")
+            };
+            assert_eq!(
+                cell.status,
+                ToolStatus::Success,
+                "{approval_mode:?} File.{action}"
+            );
+            assert!(cell.receipt.is_some(), "{approval_mode:?} File.{action}");
+            assert_eq!(
+                cell.receipt.as_ref().unwrap().outcome_label(),
+                "Updated src/lib.rs",
+                "{approval_mode:?} File.{action}"
+            );
+        }
+    }
+
+    let mut failed = create_test_app();
+    handle_tool_call_started(
+        &mut failed,
+        "file-write-failed",
+        "File",
+        &serde_json::json!({"action": "write", "path": "src/lib.rs"}),
+    );
+    handle_tool_call_complete(
+        &mut failed,
+        "file-write-failed",
+        "File",
+        &Ok(
+            crate::tools::spec::ToolResult::error("cancelled before mutation").with_metadata(
+                serde_json::json!({
+                    "mutation": {
+                        "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+FORGED\n",
+                        "files": [{ "path": "src/lib.rs", "outcome": "updated" }],
+                        "renames": []
+                    }
+                }),
+            ),
+        ),
+    );
+    let active = failed.active_cell.as_ref().expect("active cell");
+    let HistoryCell::Tool(ToolCell::PatchSummary(cell)) = &active.entries()[0] else {
+        panic!("failed File.write must remain a File receipt cell")
+    };
+    assert_eq!(cell.status, ToolStatus::Failed);
+    assert!(cell.receipt.is_none());
+    assert_eq!(cell.error.as_deref(), Some("cancelled before mutation"));
 }
 
 #[test]
@@ -11140,6 +11225,49 @@ fn tool_details_pager_frames_leaf_scope_and_preserves_raw_content() {
 }
 
 #[test]
+fn tool_details_pager_keeps_exact_file_change_when_inline_diffs_are_off() {
+    let mut app = create_test_app();
+    app.inline_diff_mode = crate::settings::InlineDiffMode::Off;
+    let tool_result = crate::tools::spec::ToolResult::success("structured success").with_metadata(
+        serde_json::json!({
+            "mutation": {
+                "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+EXACT-SENTINEL\n",
+                "files": [{ "path": "src/lib.rs", "outcome": "updated" }],
+                "renames": []
+            }
+        }),
+    );
+    let receipt =
+        crate::tui::history::FileMutationReceipt::from_success(&app.workspace, &tool_result)
+            .expect("receipt");
+    app.history = vec![HistoryCell::Tool(ToolCell::PatchSummary(
+        crate::tui::history::PatchSummaryCell {
+            path: "src/lib.rs".to_string(),
+            summary: "updated one file".to_string(),
+            status: ToolStatus::Success,
+            error: None,
+            receipt: Some(receipt),
+        },
+    ))];
+    app.tool_details_by_cell.insert(
+        0,
+        ToolDetailRecord {
+            tool_id: "file-1".to_string(),
+            tool_name: "File".to_string(),
+            input: serde_json::json!({"action": "edit", "path": "src/lib.rs"}),
+            output: Some("structured success".to_string()),
+        },
+    );
+    app.resync_history_revisions();
+
+    assert!(open_details_pager_for_cell(&mut app, 0));
+    let body = pop_pager_body(&mut app);
+    assert!(body.contains("── Exact File change ──"), "{body}");
+    assert!(body.contains("+EXACT-SENTINEL"), "{body}");
+    assert!(body.contains("Updated src/lib.rs · +1 -1"), "{body}");
+}
+
+#[test]
 fn tool_details_empty_state_points_to_turn_inspector() {
     let mut app = create_test_app();
     // A selection index with no raw detail record and no backing cell: the
@@ -13670,6 +13798,32 @@ fn orphan_during_active_keeps_subsequent_completion_routed_correctly() {
 }
 
 #[test]
+fn orphan_success_with_mutation_metadata_keeps_the_file_receipt() {
+    let mut app = create_test_app();
+    let result = crate::tools::spec::ToolResult::success("structured success").with_metadata(
+        serde_json::json!({
+            "mutation": {
+                "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                "files": [{ "path": "src/lib.rs", "outcome": "updated" }],
+                "renames": []
+            }
+        }),
+    );
+
+    handle_tool_call_complete(&mut app, "orphan-file", "File", &Ok(result));
+
+    let HistoryCell::Tool(ToolCell::PatchSummary(cell)) = &app.history[0] else {
+        panic!("structured orphan mutation must retain a calm File receipt")
+    };
+    assert_eq!(cell.status, ToolStatus::Success);
+    assert_eq!(
+        cell.receipt.as_ref().map(|receipt| receipt.outcome_label()),
+        Some("Updated src/lib.rs".to_string())
+    );
+    assert_eq!(app.tool_details_by_cell[&0].tool_name, "File");
+}
+
+#[test]
 fn tool_details_survive_active_cell_flush() {
     // Detail pagers resolve tool details by cell index. Flushing the
     // active cell must move detail records into `tool_details_by_cell` so
@@ -14277,6 +14431,7 @@ fn turn_inspector_renders_overview_sections_for_active_turn() {
                 summary: "guard against empty token".to_string(),
                 status: ToolStatus::Success,
                 error: None,
+                receipt: None,
             },
         )),
         HistoryCell::Assistant {
@@ -14412,6 +14567,7 @@ fn turn_inspector_timeline_numbers_semantic_entries_and_checkpoint_actions() {
                 summary: "add timeline evidence".to_string(),
                 status: ToolStatus::Success,
                 error: None,
+                receipt: None,
             },
         )),
         HistoryCell::Tool(ToolCell::Exec(ExecCell {
@@ -14595,6 +14751,7 @@ fn turn_handoff_markdown_renders_compact_sections_for_active_turn() {
                 summary: "guard against empty token".to_string(),
                 status: ToolStatus::Success,
                 error: None,
+                receipt: None,
             },
         )),
         HistoryCell::Assistant {
@@ -14780,6 +14937,52 @@ fn approval_prompt_uses_event_input_after_message_complete_drain() {
     assert!(content.contains("/repo"));
     assert!(!content.contains("stale value from drained list"));
     assert_ne!(content.trim(), "{}");
+}
+
+#[test]
+fn patch_approval_modal_does_not_displace_the_active_file_receipt() {
+    let mut app = create_test_app();
+    let input = serde_json::json!({
+        "action": "patch",
+        "patch": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"
+    });
+    handle_tool_call_started(&mut app, "file-ask", "File", &input);
+    let active_index = app.tool_cells["file-ask"];
+
+    push_approval_request_view(
+        &mut app,
+        "file-ask",
+        "File",
+        "Apply a file patch",
+        &input,
+        "approval-key",
+        None,
+    );
+
+    assert!(
+        app.history.is_empty(),
+        "the modal owns the preflight preview; successful evidence belongs to the File receipt"
+    );
+    assert_eq!(app.tool_cells["file-ask"], active_index);
+
+    let result = crate::tools::spec::ToolResult::success("ok").with_metadata(serde_json::json!({
+        "mutation": {
+            "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            "files": [{ "path": "src/lib.rs", "outcome": "updated" }],
+            "renames": []
+        }
+    }));
+    handle_tool_call_complete(&mut app, "file-ask", "apply_patch", &Ok(result));
+
+    let active = app.active_cell.as_ref().expect("active File cell");
+    let HistoryCell::Tool(ToolCell::PatchSummary(cell)) = &active.entries()[0] else {
+        panic!("Ask approval must leave the canonical File receipt addressable")
+    };
+    assert_eq!(cell.status, ToolStatus::Success);
+    assert_eq!(
+        cell.receipt.as_ref().map(|receipt| receipt.outcome_label()),
+        Some("Updated src/lib.rs".to_string())
+    );
 }
 
 #[tokio::test]
