@@ -1174,6 +1174,13 @@ Common settings keys:
   currently typed directory segment in deterministic alphabetical order.
 - `show_thinking` (on/off)
 - `show_tool_details` (on/off)
+- `inline_diffs` (`full`, `summary`, or `off`; default `full`): controls the
+  inline presentation of successful structured File mutations. `full` shows a
+  bounded red/green diff and semantic statistics, `summary` keeps only the
+  statistics, and `off` keeps the calm changed-file outcome. All three retain
+  the exact applied change in the selected File receipt's Alt/Option+V detail.
+  Failure and cancellation never render a successful diff. Save the choice
+  with `/config inline_diffs <mode> --save`.
 - `locale` (`auto`, `en`, `ja`, `zh-Hans`, `pt-BR`; default `auto`): UI chrome
   locale. `auto` checks `LC_ALL`, `LC_MESSAGES`, then `LANG`; unsupported or
   missing locales fall back to English. The runtime also exposes the resolved

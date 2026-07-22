@@ -18,6 +18,39 @@ use crate::tui::app::ReasoningEffort;
 const SETTINGS_FILE_NAME: &str = "settings.toml";
 const TUI_PREFS_FILE_NAME: &str = "tui.toml";
 
+/// How successful structured file mutations are represented in the live
+/// transcript. Exact evidence is retained for inspection in every mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InlineDiffMode {
+    /// Show a bounded red/green unified diff plus semantic change statistics.
+    #[default]
+    Full,
+    /// Show only bounded semantic change statistics.
+    Summary,
+    /// Keep the calm File outcome row without any inline diff detail.
+    Off,
+}
+
+impl InlineDiffMode {
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "summary" => Self::Summary,
+            "off" => Self::Off,
+            _ => Self::Full,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_setting(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Summary => "summary",
+            Self::Off => "off",
+        }
+    }
+}
+
 // ============================================================================
 // TuiPrefs — ~/.codewhale/tui.toml
 // ============================================================================
@@ -257,6 +290,10 @@ pub struct Settings {
     pub show_thinking: bool,
     /// Show detailed tool output
     pub show_tool_details: bool,
+    /// Successful structured File mutation evidence: full, summary, or off.
+    /// This affects inline presentation only; exact evidence remains available
+    /// through the tool-details route in every mode.
+    pub inline_diffs: String,
     /// UI locale: auto, en, ja, zh-Hans, pt-BR, es-419
     pub locale: String,
     /// Named UI theme. Accepts `"system"` (follow terminal background),
@@ -411,6 +448,7 @@ impl Default for Settings {
             // never displace the actual conversation in the default TUI.
             show_thinking: false,
             show_tool_details: false,
+            inline_diffs: "full".to_string(),
             locale: "auto".to_string(),
             theme: "system".to_string(),
             background_color: None,
@@ -472,6 +510,10 @@ fn normalize_work_surface_placement(value: &str) -> &'static str {
         "right" => "right",
         _ => "top",
     }
+}
+
+fn normalize_inline_diffs(value: &str) -> &'static str {
+    InlineDiffMode::parse(value).as_setting()
 }
 
 /// The `(key, value)` fields a named preset applies, or `None` for an unknown
@@ -609,6 +651,7 @@ impl Settings {
             s.ocean_treatment = normalize_ocean_treatment(&s.ocean_treatment).to_string();
             s.work_surface_placement =
                 normalize_work_surface_placement(&s.work_surface_placement).to_string();
+            s.inline_diffs = normalize_inline_diffs(&s.inline_diffs).to_string();
             s.synchronized_output =
                 normalize_synchronized_output(&s.synchronized_output).to_string();
             s.locale = normalize_configured_locale(&s.locale)
@@ -857,6 +900,15 @@ impl Settings {
             "show_tool_details" | "tool_details" => {
                 self.show_tool_details = parse_bool(value)?;
             }
+            "inline_diffs" | "inline_diff" | "diffs" => {
+                let normalized = value.trim().to_ascii_lowercase();
+                if !matches!(normalized.as_str(), "full" | "summary" | "off") {
+                    anyhow::bail!(
+                        "Failed to update setting: invalid inline diff mode '{value}'. Expected: full, summary, or off."
+                    );
+                }
+                self.inline_diffs = normalized;
+            }
             "locale" | "language" => {
                 let Some(locale) = normalize_configured_locale(value) else {
                     anyhow::bail!(
@@ -1104,6 +1156,7 @@ impl Settings {
         ));
         lines.push(format!("  show_thinking:      {}", self.show_thinking));
         lines.push(format!("  show_tool_details:  {}", self.show_tool_details));
+        lines.push(format!("  inline_diffs:      {}", self.inline_diffs));
         lines.push(format!("  locale:            {}", self.locale));
         lines.push(format!("  theme:              {}", self.theme));
         lines.push(format!(
@@ -1234,6 +1287,10 @@ impl Settings {
             ),
             ("show_thinking", "Show model thinking: on/off"),
             ("show_tool_details", "Show detailed tool output: on/off"),
+            (
+                "inline_diffs",
+                "Successful File mutation evidence: full/summary/off (exact detail is always retained)",
+            ),
             (
                 "base_url",
                 "HTTP base URL for DeepSeek-compatible endpoints.",
@@ -1784,6 +1841,30 @@ mod tests {
             .expect_err("bottom is owned by composer/footer");
         assert!(err.to_string().contains("top, left, or right"));
         assert_eq!(settings.work_surface_placement, "top");
+    }
+
+    #[test]
+    fn inline_diffs_default_full_and_persist_exactly_one_mode() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.inline_diffs, "full");
+        assert_eq!(
+            InlineDiffMode::parse(&settings.inline_diffs),
+            InlineDiffMode::Full
+        );
+
+        for mode in ["summary", "off", "full"] {
+            settings.set("inline_diffs", mode).expect("valid mode");
+            assert_eq!(settings.inline_diffs, mode);
+            let body = toml::to_string(&settings).expect("serialize settings");
+            let restored: Settings = toml::from_str(&body).expect("restore settings");
+            assert_eq!(restored.inline_diffs, mode);
+        }
+
+        let error = settings
+            .set("inline_diffs", "compact")
+            .expect_err("unknown mode must not be guessed");
+        assert!(error.to_string().contains("full, summary, or off"));
+        assert_eq!(settings.inline_diffs, "full");
     }
 
     /// Explicit animated baseline for env-force tests (#4095 flipped defaults to calm).

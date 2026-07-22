@@ -659,15 +659,27 @@ pub(crate) fn open_details_pager_for_cell(app: &mut App, cell_index: usize) -> b
         // stays above as `Output:` so the user can compare what the
         // model received against the full payload.
         let spillover_section = spillover_pager_section(app, cell_index);
+        let mutation_section = match app.cell_at_virtual_index(cell_index) {
+            Some(HistoryCell::Tool(ToolCell::PatchSummary(cell))) => cell
+                .receipt
+                .as_ref()
+                .map(|receipt| format!("── Exact File change ──\n{}", receipt.inspect_text())),
+            _ => None,
+        };
 
         // Frame the body as leaf-level raw detail for the selected item. The
         // Tool ID / Input / Output / spillover content below is unchanged — only
         // the leading intro line is new, so existing raw-output visibility is
         // preserved (#4105).
-        let content = if let Some(section) = spillover_section {
+        let trailing_sections = [mutation_section, spillover_section]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let content = if !trailing_sections.is_empty() {
             format!(
                 "{RAW_DETAIL_PAGER_INTRO}\n\nTool ID: {}\nTool: {}\n\nInput:\n{}\n\nOutput:\n{}\n\n{}",
-                detail.tool_id, detail.tool_name, input, output, section
+                detail.tool_id, detail.tool_name, input, output, trailing_sections
             )
         } else {
             format!(

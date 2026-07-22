@@ -1450,6 +1450,13 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Display,
+                key: "inline_diffs".to_string(),
+                value: settings.inline_diffs.clone(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
                 key: "status_indicator".to_string(),
                 value: settings.status_indicator.clone(),
                 editable: true,
@@ -2399,6 +2406,7 @@ fn config_label_for_key(key: &str) -> String {
         "launch_screen" => "Launch screen",
         "show_thinking" => "Model reasoning in chat",
         "show_tool_details" => "Tool detail level",
+        "inline_diffs" => "Inline file changes",
         "status_indicator" => "Status indicator",
         "synchronized_output" => "Output pacing",
         "cost_currency" => "Cost currency",
@@ -2476,6 +2484,7 @@ fn config_hint_for_key(key: &str) -> &'static str {
         | "composer_border"
         | "paste_burst_detection" => "on/off, true/false, yes/no, 1/0",
         "composer_density" | "transcript_spacing" => "compact | comfortable | spacious",
+        "inline_diffs" => "full | summary | off; exact change remains in Alt/Option+V details",
         "tool_collapse" => "compact | expanded | calm",
         // Derived from the shipped theme/locale registries so these hints
         // cannot go stale as new entries land (they previously advertised
@@ -2588,6 +2597,7 @@ fn config_choice_values(key: &str, provider: ApiProvider) -> Option<Vec<String>>
             vec!["compact", "comfortable", "spacious"]
         }
         "tool_collapse" => vec!["compact", "expanded", "calm"],
+        "inline_diffs" => vec!["full", "summary", "off"],
         "composer_vim_mode" => vec!["normal", "vim"],
         "mention_menu_behavior" => vec!["fuzzy", "browser"],
         "sidebar_focus" => vec!["pinned", "auto", "tasks", "agents", "context", "hidden"],
@@ -2671,6 +2681,9 @@ fn config_choice_label(key: &str, value: &str) -> String {
         ("status_indicator", "whale") => "Animated whale".to_string(),
         ("status_indicator", "dots") => "Animated dots".to_string(),
         ("status_indicator", "off") => "Off".to_string(),
+        ("inline_diffs", "full") => "Full diff".to_string(),
+        ("inline_diffs", "summary") => "Summary".to_string(),
+        ("inline_diffs", "off") => "Off".to_string(),
         ("sidebar_focus", "pinned") => "Work pinned".to_string(),
         ("sidebar_focus", "tasks") => "Activity".to_string(),
         ("sidebar_focus", "agents") => "Workers".to_string(),

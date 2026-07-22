@@ -66,6 +66,7 @@ pub struct SettingsSection {
     pub paste_burst_detection: bool,
     pub show_thinking: bool,
     pub show_tool_details: bool,
+    pub inline_diffs: InlineDiffValue,
     pub locale: UiLocale,
     pub theme: UiThemeValue,
     #[schemars(
@@ -251,6 +252,14 @@ pub enum TranscriptSpacingValue {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum InlineDiffValue {
+    Full,
+    Summary,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkSurfacePlacementValue {
     Top,
     Left,
@@ -371,6 +380,7 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             paste_burst_detection: settings.paste_burst_detection,
             show_thinking: settings.show_thinking,
             show_tool_details: settings.show_tool_details,
+            inline_diffs: settings.inline_diffs.as_str().into(),
             locale: UiLocale::from_setting(&settings.locale)?,
             theme: UiThemeValue::from_setting(&settings.theme)?,
             background_color: settings.background_color.clone(),
@@ -558,6 +568,7 @@ pub fn apply_document(
             "show_tool_details",
             bool_str(doc.settings.show_tool_details),
         ),
+        ("inline_diffs", doc.settings.inline_diffs.as_setting()),
         ("locale", doc.settings.locale.as_setting()),
         ("theme", doc.settings.theme.as_setting()),
         (
@@ -976,6 +987,26 @@ impl TranscriptSpacingValue {
             Self::Compact => "compact",
             Self::Comfortable => "comfortable",
             Self::Spacious => "spacious",
+        }
+    }
+}
+
+impl InlineDiffValue {
+    fn as_setting(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Summary => "summary",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl From<&str> for InlineDiffValue {
+    fn from(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "summary" => Self::Summary,
+            "off" => Self::Off,
+            _ => Self::Full,
         }
     }
 }
@@ -1411,6 +1442,8 @@ background_color = "#1A1B26"
         );
         let default_mode = &schema["$defs"]["DefaultModeValue"]["enum"];
         assert_eq!(default_mode, &serde_json::json!(["agent", "plan"]));
+        let inline_diffs = &schema["$defs"]["InlineDiffValue"]["enum"];
+        assert_eq!(inline_diffs, &serde_json::json!(["full", "summary", "off"]));
         let locale = &schema["$defs"]["UiLocale"]["enum"];
         assert_eq!(
             locale,

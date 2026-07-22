@@ -12,8 +12,8 @@ use crate::tools::spec::{ToolError, ToolResult};
 use crate::tui::active_cell::ActiveCell;
 use crate::tui::app::{App, ToolDetailRecord, ToolEvidence};
 use crate::tui::history::{
-    DiffPreviewCell, ExecCell, ExecSource, ExploringEntry, GenericToolCell, HistoryCell,
-    McpToolCell, PatchSummaryCell, PlanUpdateCell, ReviewCell, ToolCell, ToolStatus, ViewImageCell,
+    ExecCell, ExecSource, ExploringEntry, GenericToolCell, HistoryCell, McpToolCell,
+    PatchSummaryCell, PlanUpdateCell, ReviewCell, ToolCell, ToolStatus, ViewImageCell,
     WebSearchCell, output_looks_like_diff, summarize_mcp_output, summarize_tool_args,
     summarize_tool_output,
 };
@@ -169,8 +169,8 @@ pub(super) fn handle_tool_call_started(
         return;
     }
 
-    if semantic_name == "apply_patch" {
-        let (path, summary) = parse_patch_summary(input);
+    if matches!(semantic_name, "write_file" | "edit_file" | "apply_patch") {
+        let (path, summary) = parse_file_mutation_summary(semantic_name, input);
         push_active_tool_cell(
             app,
             &id,
@@ -181,6 +181,7 @@ pub(super) fn handle_tool_call_started(
                 summary,
                 status: ToolStatus::Running,
                 error: None,
+                receipt: None,
             })),
         );
         return;
@@ -618,6 +619,16 @@ pub(super) fn handle_tool_call_complete(
     let in_active = cell_index >= app.history.len();
 
     let status = tool_status_from_result(result);
+    let mutation_receipt = matches!(
+        semantic_name.as_str(),
+        "write_file" | "edit_file" | "apply_patch"
+    )
+    .then(|| {
+        result.as_ref().ok().and_then(|tool_result| {
+            crate::tui::history::FileMutationReceipt::from_success(&app.workspace, tool_result)
+        })
+    })
+    .flatten();
     let mut workflow_panel_output: Option<String> = None;
 
     if let Some(cell) = app.cell_at_virtual_index_mut(cell_index) {
@@ -705,14 +716,18 @@ pub(super) fn handle_tool_call_complete(
             }
             HistoryCell::Tool(ToolCell::PatchSummary(patch)) => {
                 patch.status = status;
+                patch.receipt = mutation_receipt;
                 match result.as_ref() {
-                    Ok(tool_result) => {
+                    Ok(tool_result) if tool_result.success => {
                         if let Ok(json) =
                             serde_json::from_str::<serde_json::Value>(&tool_result.content)
                             && let Some(message) = json.get("message").and_then(|v| v.as_str())
                         {
                             patch.summary = message.to_string();
                         }
+                    }
+                    Ok(tool_result) => {
+                        patch.error = Some(tool_result.content.clone());
                     }
                     Err(err) => {
                         patch.error = Some(err.to_string());
@@ -1240,8 +1255,9 @@ fn history_cell_has_running_tool(cell: &HistoryCell) -> bool {
 /// every tool result is visible somewhere; the alternative (silently
 /// dropping it) hides errors and breaks debuggability.
 ///
-/// Choice of cell type: we use `GenericToolCell` because we have no input
-/// payload to reconstruct a more specific cell. The pager remains usable —
+/// Choice of cell type: success-only mutation metadata is sufficient to
+/// reconstruct a structured File receipt; other orphans stay generic because
+/// no input payload remains. The pager remains usable in both cases because
 /// `tool_details_by_cell` is populated with the result text.
 ///
 /// ## Index drift
@@ -1272,16 +1288,35 @@ fn push_orphan_tool_completion(
         .map(std::path::PathBuf::from);
     let output_summary = output.as_deref().map(summarize_tool_output);
     let is_diff = output.as_deref().is_some_and(output_looks_like_diff);
-    app.add_message(HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-        name: name.to_string(),
-        status,
-        input_summary: None,
-        output,
-        prompts: None,
-        spillover_path,
-        output_summary,
-        is_diff,
-    })));
+    let mutation_receipt = result.as_ref().ok().and_then(|tool_result| {
+        crate::tui::history::FileMutationReceipt::from_success(&app.workspace, tool_result)
+    });
+    let cell = if let Some(receipt) = mutation_receipt {
+        let path = receipt
+            .files
+            .first()
+            .map_or_else(|| "<file>".to_string(), |file| file.path.clone());
+        let summary = receipt.semantic_summary();
+        HistoryCell::Tool(ToolCell::PatchSummary(PatchSummaryCell {
+            path,
+            summary,
+            status,
+            error: None,
+            receipt: Some(receipt),
+        }))
+    } else {
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: name.to_string(),
+            status,
+            input_summary: None,
+            output,
+            prompts: None,
+            spillover_path,
+            output_summary,
+            is_diff,
+        }))
+    };
+    app.add_message(cell);
     let cell_index = app.history.len().saturating_sub(1);
     app.tool_details_by_cell.insert(
         cell_index,
@@ -1486,7 +1521,22 @@ fn parse_plan_input(input: &serde_json::Value) -> PlanSnapshot {
     PlanSnapshot::from_tool_input(input)
 }
 
-fn parse_patch_summary(input: &serde_json::Value) -> (String, String) {
+fn parse_file_mutation_summary(semantic_name: &str, input: &serde_json::Value) -> (String, String) {
+    if semantic_name != "apply_patch" {
+        let path = input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or("<file>")
+            .to_string();
+        let summary = match semantic_name {
+            "write_file" => "Writing file",
+            "edit_file" => "Editing file",
+            _ => "Changing file",
+        }
+        .to_string();
+        return (path, summary);
+    }
     let patch_text = match normalize_apply_patch_input(input) {
         Ok(NormalizedApplyPatchInput::Replacement {
             entries: changes, ..
@@ -1561,60 +1611,6 @@ fn extract_patch_paths(patch: &str) -> Vec<String> {
         }
     }
     paths
-}
-
-pub(super) fn maybe_add_patch_preview(app: &mut App, input: &serde_json::Value) {
-    match normalize_apply_patch_input(input) {
-        Ok(NormalizedApplyPatchInput::Patch(patch)) => {
-            app.add_message(HistoryCell::Tool(ToolCell::DiffPreview(DiffPreviewCell {
-                title: "Patch Preview".to_string(),
-                diff: patch.to_string(),
-            })));
-            app.mark_history_updated();
-        }
-        Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
-            let preview = format_changes_preview(entries);
-            if !preview.trim().is_empty() {
-                app.add_message(HistoryCell::Tool(ToolCell::DiffPreview(DiffPreviewCell {
-                    title: "Changes Preview".to_string(),
-                    diff: preview,
-                })));
-                app.mark_history_updated();
-            }
-        }
-        Err(_) => {}
-    }
-}
-
-fn format_changes_preview(changes: &[serde_json::Value]) -> String {
-    let mut out = String::new();
-    for change in changes {
-        let path = change
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("<file>");
-        let content = change.get("content").and_then(|v| v.as_str()).unwrap_or("");
-
-        out.push_str(&format!("diff --git a/{path} b/{path}\n"));
-        out.push_str(&format!("--- a/{path}\n+++ b/{path}\n"));
-        out.push_str("@@ -0,0 +1,1 @@\n");
-
-        let mut count = 0usize;
-        for line in content.lines() {
-            out.push('+');
-            out.push_str(line);
-            out.push('\n');
-            count += 1;
-            if count >= 20 {
-                out.push_str("+... (truncated)\n");
-                break;
-            }
-        }
-        if content.is_empty() {
-            out.push_str("+\n");
-        }
-    }
-    out
 }
 
 fn count_patch_changes(patch: &str) -> (usize, usize) {
@@ -1874,8 +1870,9 @@ mod tests {
             "content": "fn replacement() {}\n"
         }]);
 
-        let canonical = parse_patch_summary(&json!({"replace": replacements.clone()}));
-        let legacy = parse_patch_summary(&json!({"changes": replacements}));
+        let canonical =
+            parse_file_mutation_summary("apply_patch", &json!({"replace": replacements.clone()}));
+        let legacy = parse_file_mutation_summary("apply_patch", &json!({"changes": replacements}));
 
         assert_eq!(canonical, legacy);
     }

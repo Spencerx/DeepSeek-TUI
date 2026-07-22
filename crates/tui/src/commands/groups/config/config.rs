@@ -297,6 +297,9 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             }
             .to_string(),
         ),
+        "inline_diffs" | "inline_diff" | "diffs" => {
+            Some(app.inline_diff_mode.as_setting().to_string())
+        }
         "mode" | "default_mode" => Some(app.mode.as_setting().to_string()),
         "max_history" | "history" => Some(app.max_input_history.to_string()),
         "sidebar_width" | "sidebar" => Some(app.sidebar_width_percent.to_string()),
@@ -1842,6 +1845,11 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         "show_tool_details" | "tool_details" => {
             app.show_tool_details = settings.show_tool_details;
             app.mark_history_updated();
+        }
+        "inline_diffs" | "inline_diff" | "diffs" => {
+            app.inline_diff_mode = crate::settings::InlineDiffMode::parse(&settings.inline_diffs);
+            app.mark_history_updated();
+            app.needs_redraw = true;
         }
         "locale" | "language" => {
             app.ui_locale = resolve_locale(&settings.locale);
