@@ -5273,32 +5273,48 @@ fn catalog_consistency_self_check_flags_registered_core_tool_missing_from_catalo
     );
 }
 
-#[test]
-fn tool_search_reports_known_core_action_tool_when_current_catalog_omits_it() {
+fn assert_exec_shell_is_not_discoverable(match_kind: &str) {
     let catalog = vec![api_tool("read_file")];
     let mut active = initial_active_tools(&catalog);
 
     let result = execute_tool_search(
         TOOL_SEARCH_NAME,
-        &json!({ "query": "exec_shell" }),
+        &json!({ "query": "exec_shell", "match": match_kind }),
         &catalog,
         &mut active,
     )
     .expect("tool search succeeds");
 
     assert!(!active.contains("exec_shell"));
-    let unavailable = result.metadata.as_ref().unwrap()["unavailable_tool_references"]
+    let metadata = result.metadata.as_ref().expect("search metadata");
+    let references = metadata["tool_references"]
+        .as_array()
+        .expect("tool references are an array");
+    assert!(
+        references
+            .iter()
+            .all(|reference| reference.as_str() != Some("exec_shell")),
+        "legacy shell alias must not surface via {match_kind}: {references:?}"
+    );
+    let unavailable = metadata["unavailable_tool_references"]
         .as_array()
         .expect("unavailable references are an array");
     assert!(
-        unavailable.iter().any(|reference| {
-            reference["tool_name"].as_str() == Some("exec_shell")
-                && reference["reason"]
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("allow_shell = true"))
-        }),
-        "known-but-omitted core action tool should surface with a reason: {unavailable:?}"
+        unavailable
+            .iter()
+            .all(|reference| reference["tool_name"].as_str() != Some("exec_shell")),
+        "legacy shell alias must not surface as an unavailable fallback via {match_kind}: {unavailable:?}"
     );
+}
+
+#[test]
+fn regex_tool_search_does_not_discover_hidden_exec_shell_alias() {
+    assert_exec_shell_is_not_discoverable("regex");
+}
+
+#[test]
+fn bm25_tool_search_does_not_discover_hidden_exec_shell_alias() {
+    assert_exec_shell_is_not_discoverable("bm25");
 }
 
 #[test]
