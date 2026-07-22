@@ -137,6 +137,7 @@ function deriveProvidersFromConfig(cfg: string): ProviderFact[] {
     Sakana: { id: "sakana", label: "Sakana AI", env: "FUGU_API_KEY / SAKANA_API_KEY" },
     LongCat: { id: "longcat", label: "Meituan LongCat", env: "LONGCAT_API_KEY" },
     Meta: { id: "meta", label: "Meta Model API", env: "META_MODEL_API_KEY / MODEL_API_KEY" },
+    Telecomjs: { id: "telecomjs", label: "TelecomJS TokenHub", env: "TELECOMJS_API_KEY" },
     Xai: { id: "xai", label: "xAI", env: "XAI_API_KEY" },
   };
   // Log loudly on unmapped variants so a new provider can never be silently

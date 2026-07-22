@@ -27,7 +27,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-07-22T00:51:16.685Z",
+  "generatedAt": "2026-07-22T05:31:36.792Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
   "version": "0.9.1",
@@ -225,6 +225,11 @@ export const FACTS: RepoFacts = {
       "id": "xai",
       "label": "xAI",
       "env": "XAI_API_KEY"
+    },
+    {
+      "id": "telecomjs",
+      "label": "TelecomJS TokenHub",
+      "env": "TELECOMJS_API_KEY"
     }
   ],
   "defaultModel": "deepseek-v4-pro",
