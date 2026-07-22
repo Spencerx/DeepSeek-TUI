@@ -1556,30 +1556,21 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
     assert!(cycled.contains("Work"), "{}", cycled.debug_dump());
 
     let before_path = ws.workspace().join("wg6-before-export.json");
-    h.send(keys::key::text(&format!(
-        "/save {}",
-        before_path.to_string_lossy()
-    )))?;
+    h.send(keys::key::text("/save wg6-before-export.json"))?;
     h.wait_for_text("/save", KEY_TIMEOUT)?;
     h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
     h.send(keys::key::enter())?;
     h.wait_for_text("Session saved to", KEY_TIMEOUT)?;
 
     let export_path = ws.workspace().join("wg6-export.md");
-    h.send(keys::key::text(&format!(
-        "/export {}",
-        export_path.to_string_lossy()
-    )))?;
+    h.send(keys::key::text("/export wg6-export.md"))?;
     h.wait_for_text("/export", KEY_TIMEOUT)?;
     h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
     h.send(keys::key::enter())?;
     h.wait_for_text("Conversation exported to", KEY_TIMEOUT)?;
 
     let after_path = ws.workspace().join("wg6-after-export.json");
-    h.send(keys::key::text(&format!(
-        "/save {}",
-        after_path.to_string_lossy()
-    )))?;
+    h.send(keys::key::text("/save wg6-after-export.json"))?;
     h.wait_for_text("/save", KEY_TIMEOUT)?;
     h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
     h.send(keys::key::enter())?;
