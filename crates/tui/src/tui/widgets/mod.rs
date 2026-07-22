@@ -1332,9 +1332,12 @@ impl Renderable for ComposerWidget<'_> {
                 None
             };
 
+            // Warm permission ramp: Ask is amber, Auto-Review is Signal Gold,
+            // and Full Access is coral. The bottom edge independently carries
+            // the cool Plan -> Act -> Operate mode ramp.
             let permission_color = match self.app.approval_mode {
-                ApprovalMode::Suggest | ApprovalMode::Never => palette::WHALE_HUMAN,
-                ApprovalMode::Auto => palette::TEXT_REASONING,
+                ApprovalMode::Suggest | ApprovalMode::Never => palette::TEXT_REASONING,
+                ApprovalMode::Auto => palette::WHALE_HUMAN,
                 ApprovalMode::Bypass => palette::STATUS_WARNING,
             };
             let mut top_border = Block::default()
@@ -5659,14 +5662,15 @@ mod tests {
     }
 
     #[test]
-    fn composer_border_edges_encode_permission_and_mode() {
+    fn composer_border_edges_encode_warm_permission_and_cool_mode_ramps() {
         let slash_menu_entries = Vec::<SlashMenuEntry>::new();
         let mention_menu_entries = Vec::<String>::new();
         let area = Rect::new(0, 0, 40, 5);
 
+        // Shift-Tab cycle order must stay amber -> Signal Gold -> coral.
         for (approval_mode, expected) in [
-            (ApprovalMode::Suggest, palette::WHALE_HUMAN),
-            (ApprovalMode::Auto, palette::TEXT_REASONING),
+            (ApprovalMode::Suggest, palette::TEXT_REASONING),
+            (ApprovalMode::Auto, palette::WHALE_HUMAN),
             (ApprovalMode::Bypass, palette::STATUS_WARNING),
         ] {
             let mut app = create_test_app();
@@ -5679,6 +5683,21 @@ mod tests {
             assert_eq!(buf[(1, area.top())].fg, expected, "{approval_mode:?}");
         }
 
+        // Never is a fail-closed Ask-family posture, so it keeps Ask amber and
+        // never enters the three-step user-facing permission cycle.
+        let mut never_app = create_test_app();
+        never_app.approval_mode = ApprovalMode::Never;
+        let never_widget =
+            ComposerWidget::new(&never_app, 5, &slash_menu_entries, &mention_menu_entries);
+        let mut never_buf = Buffer::empty(area);
+        never_widget.render(area, &mut never_buf);
+        assert_eq!(
+            never_buf[(1, area.top())].fg,
+            palette::TEXT_REASONING,
+            "Never must keep the fail-closed Ask-family amber"
+        );
+
+        // The bottom edge remains the independent icy -> blue -> violet ramp.
         for (mode, expected) in [
             (AppMode::Plan, palette::MODE_PLAN),
             (AppMode::Agent, palette::MODE_AGENT),

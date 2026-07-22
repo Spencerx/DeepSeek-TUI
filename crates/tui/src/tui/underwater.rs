@@ -661,9 +661,11 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
         AppMode::Operate => app.ui_theme.mode_operate,
         _ => app.ui_theme.mode_agent,
     };
+    // Match the composer's warm top edge exactly: Ask amber, Auto-Review
+    // Signal Gold, and Full Access coral.
     let permission_color = match app.approval_mode {
-        ApprovalMode::Suggest | ApprovalMode::Never => palette::WHALE_HUMAN,
-        ApprovalMode::Auto => palette::TEXT_REASONING,
+        ApprovalMode::Suggest | ApprovalMode::Never => palette::TEXT_REASONING,
+        ApprovalMode::Auto => palette::WHALE_HUMAN,
         ApprovalMode::Bypass => palette::STATUS_WARNING,
     };
     let status_indicator = crate::tui::widgets::header_status_indicator_frame(
@@ -1137,16 +1139,17 @@ mod tests {
     }
 
     #[test]
-    fn header_permission_color_matches_the_composer_warm_ramp() {
+    fn header_labels_follow_the_ask_amber_auto_gold_full_access_coral_ramp() {
         for width in [40, 100] {
-            for (approval_mode, expected) in [
-                (ApprovalMode::Suggest, palette::WHALE_HUMAN),
-                (ApprovalMode::Auto, palette::TEXT_REASONING),
-                (ApprovalMode::Bypass, palette::STATUS_WARNING),
+            for (approval_mode, expected_label, expected_color) in [
+                (ApprovalMode::Suggest, "ask", palette::TEXT_REASONING),
+                (ApprovalMode::Auto, "auto", palette::WHALE_HUMAN),
+                (ApprovalMode::Bypass, "Full Access", palette::STATUS_WARNING),
             ] {
                 let mut app = test_app();
                 app.approval_mode = approval_mode;
                 let label = permission_label(&app).into_owned();
+                assert_eq!(label, expected_label, "{approval_mode:?}");
                 let area = Rect::new(0, 0, width, 1);
                 let mut buf = Buffer::empty(area);
 
@@ -1157,7 +1160,7 @@ mod tests {
                     .find(&label)
                     .expect("permission label should render");
                 let label_x = rendered[..label_byte].width() as u16;
-                assert_eq!(buf[(label_x, 0)].fg, expected, "{approval_mode:?}");
+                assert_eq!(buf[(label_x, 0)].fg, expected_color, "{approval_mode:?}");
             }
         }
     }
