@@ -453,7 +453,7 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
         (40_u16, 12_u16, "terminal", false),
         (60, 16, "grayscale", false),
         (80, 24, "dark", true),
-        (100, 32, "light", false),
+        (100, 30, "light", false),
         (140, 40, "dark", false),
     ];
     let mut theme_signatures = Vec::<(&str, String)>::new();
@@ -563,10 +563,10 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
             )?;
         }
 
-        // The widest dark terminal also proves the cool agency ramp and warm
-        // permission ramp end to end. Header labels and split composer edges
+        // Prove the cool agency ramp and warm permission ramp end to end in
+        // both dark and light themes. Header labels and split composer edges
         // must change together, and each state must retain its own ANSI color.
-        if cols == 140 {
+        if cols == 140 || theme == "light" {
             let (act, ask) = assert_control_grammar(h.frame(), "act", "ask", COMPOSER_READY_TEXT);
 
             h.send(b"\t")?;
@@ -579,8 +579,10 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
             let (operate, _) =
                 assert_control_grammar(h.frame(), "operate", "ask", "Coordinate parallel tasks");
             write_real_pty_evidence(
-                "agency-operate-140x40",
-                "size=140x40\ntheme=dark\nmode=operate\npermission=ask\nreduced_motion=true\nascii_safe=false",
+                &format!("agency-operate-{theme}-{cols}x{rows}"),
+                &format!(
+                    "size={cols}x{rows}\ntheme={theme}\nmode=operate\npermission=ask\nreduced_motion=true\nascii_safe=false"
+                ),
                 h.frame(),
             )?;
 
@@ -596,8 +598,10 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
             let (plan, _) =
                 assert_control_grammar(h.frame(), "plan", "read only", COMPOSER_READY_TEXT);
             write_real_pty_evidence(
-                "agency-plan-140x40",
-                "size=140x40\ntheme=dark\nmode=plan\npermission=read-only\nreduced_motion=true\nascii_safe=false",
+                &format!("agency-plan-{theme}-{cols}x{rows}"),
+                &format!(
+                    "size={cols}x{rows}\ntheme={theme}\nmode=plan\npermission=read-only\nreduced_motion=true\nascii_safe=false"
+                ),
                 h.frame(),
             )?;
             assert_ne!(plan, act, "Plan and Act collapsed to one ANSI color");
@@ -625,8 +629,10 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
             )?;
             let (_, auto) = assert_control_grammar(h.frame(), "act", "auto", COMPOSER_READY_TEXT);
             write_real_pty_evidence(
-                "permission-auto-140x40",
-                "size=140x40\ntheme=dark\nmode=act\npermission=auto\nreduced_motion=true\nascii_safe=false",
+                &format!("permission-auto-{theme}-{cols}x{rows}"),
+                &format!(
+                    "size={cols}x{rows}\ntheme={theme}\nmode=act\npermission=auto\nreduced_motion=true\nascii_safe=false"
+                ),
                 h.frame(),
             )?;
 
@@ -638,8 +644,10 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
             let (_, full_access) =
                 assert_control_grammar(h.frame(), "act", "Full Access", COMPOSER_READY_TEXT);
             write_real_pty_evidence(
-                "permission-full-access-140x40",
-                "size=140x40\ntheme=dark\nmode=act\npermission=full-access\nreduced_motion=true\nascii_safe=false",
+                &format!("permission-full-access-{theme}-{cols}x{rows}"),
+                &format!(
+                    "size={cols}x{rows}\ntheme={theme}\nmode=act\npermission=full-access\nreduced_motion=true\nascii_safe=false"
+                ),
                 h.frame(),
             )?;
             assert_ne!(ask, auto, "Ask and Auto collapsed to one ANSI color");
@@ -3340,7 +3348,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
         h.frame().debug_dump()
     );
 
-    for (cols, rows) in [(80_u16, 24_u16), (100, 32), (140, 40)] {
+    for (cols, rows) in [(80_u16, 24_u16), (100, 30), (140, 40)] {
         resize_and_wait_for_composition(
             &mut h,
             rows,
@@ -3414,7 +3422,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
     );
 
     let mut live_colors = None;
-    for (cols, rows) in [(80_u16, 24_u16), (100, 32), (140, 40)] {
+    for (cols, rows) in [(80_u16, 24_u16), (100, 30), (140, 40)] {
         resize_and_wait_for_composition(
             &mut h,
             rows,
@@ -3490,7 +3498,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
         "settled transcript head is not reviewable at 140x40:\n{}",
         h.frame().debug_dump()
     );
-    for (cols, rows) in [(100_u16, 32_u16), (80, 24)] {
+    for (cols, rows) in [(100_u16, 30_u16), (80, 24)] {
         resize_and_wait_for_composition(
             &mut h,
             rows,
@@ -3521,7 +3529,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
     // geometry. Select that row with terminal mouse bytes, then exercise the
     // shipped Alt/Option+V detail shortcut; screenshots remain genuine PTY
     // frames and never include a fabricated product surface.
-    for (cols, rows) in [(80_u16, 24_u16), (100, 32), (140, 40)] {
+    for (cols, rows) in [(80_u16, 24_u16), (100, 30), (140, 40)] {
         resize_and_wait_for_composition(
             &mut h,
             rows,
@@ -3579,7 +3587,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
         h.frame().debug_dump()
     );
 
-    for (cols, rows) in [(100_u16, 32_u16), (140, 40)] {
+    for (cols, rows) in [(100_u16, 30_u16), (140, 40)] {
         resize_and_wait_for_composition(
             &mut h,
             rows,
