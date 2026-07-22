@@ -1140,6 +1140,45 @@ pub enum MessageId {
     SidebarDestructiveArmed,
     WorkSurfaceTodoProgress,
     WorkSurfaceStopConfirmHint,
+    CoordinationWorkTitle,
+    CoordinationSummaryDecisions,
+    CoordinationSummaryContentions,
+    CoordinationSummaryReconciled,
+    CoordinationSchema,
+    CoordinationSequence,
+    CoordinationPerSectionLimit,
+    CoordinationDecisionsHeading,
+    CoordinationNone,
+    CoordinationNoneValue,
+    CoordinationStatus,
+    CoordinationOwner,
+    CoordinationVersion,
+    CoordinationWriteClaimsHeading,
+    CoordinationIsolated,
+    CoordinationSharedWorkspace,
+    CoordinationPaths,
+    CoordinationContracts,
+    CoordinationContentionsHeading,
+    CoordinationClaimant,
+    CoordinationDisposition,
+    CoordinationNeutralReconciliationHeading,
+    CoordinationCandidates,
+    CoordinationRetry,
+    CoordinationReviewer,
+    CoordinationVerifier,
+    CoordinationVerification,
+    CoordinationContextProjectionsHeading,
+    CoordinationContextDecisions,
+    CoordinationBytes,
+    CoordinationDeduplicated,
+    CoordinationOmitted,
+    CoordinationActiveHotPathsHeading,
+    CoordinationActiveClaims,
+    CoordinationMetricsNoteHeading,
+    CoordinationMetricsNoAuthoritativeSource,
+    CoordinationStatusProposed,
+    CoordinationStatusAccepted,
+    CoordinationStatusSuperseded,
     // Composer slash menu.
     ComposerSlashMenuHint,
     // Approval modal — repository law band.
@@ -2165,6 +2204,45 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::SidebarDestructiveArmed,
     MessageId::WorkSurfaceTodoProgress,
     MessageId::WorkSurfaceStopConfirmHint,
+    MessageId::CoordinationWorkTitle,
+    MessageId::CoordinationSummaryDecisions,
+    MessageId::CoordinationSummaryContentions,
+    MessageId::CoordinationSummaryReconciled,
+    MessageId::CoordinationSchema,
+    MessageId::CoordinationSequence,
+    MessageId::CoordinationPerSectionLimit,
+    MessageId::CoordinationDecisionsHeading,
+    MessageId::CoordinationNone,
+    MessageId::CoordinationNoneValue,
+    MessageId::CoordinationStatus,
+    MessageId::CoordinationOwner,
+    MessageId::CoordinationVersion,
+    MessageId::CoordinationWriteClaimsHeading,
+    MessageId::CoordinationIsolated,
+    MessageId::CoordinationSharedWorkspace,
+    MessageId::CoordinationPaths,
+    MessageId::CoordinationContracts,
+    MessageId::CoordinationContentionsHeading,
+    MessageId::CoordinationClaimant,
+    MessageId::CoordinationDisposition,
+    MessageId::CoordinationNeutralReconciliationHeading,
+    MessageId::CoordinationCandidates,
+    MessageId::CoordinationRetry,
+    MessageId::CoordinationReviewer,
+    MessageId::CoordinationVerifier,
+    MessageId::CoordinationVerification,
+    MessageId::CoordinationContextProjectionsHeading,
+    MessageId::CoordinationContextDecisions,
+    MessageId::CoordinationBytes,
+    MessageId::CoordinationDeduplicated,
+    MessageId::CoordinationOmitted,
+    MessageId::CoordinationActiveHotPathsHeading,
+    MessageId::CoordinationActiveClaims,
+    MessageId::CoordinationMetricsNoteHeading,
+    MessageId::CoordinationMetricsNoAuthoritativeSource,
+    MessageId::CoordinationStatusProposed,
+    MessageId::CoordinationStatusAccepted,
+    MessageId::CoordinationStatusSuperseded,
     MessageId::ComposerSlashMenuHint,
     MessageId::ApprovalRepoLawBadge,
     MessageId::ApprovalRepoLawTitle,
@@ -2456,14 +2534,77 @@ mod tests {
         }
     }
 
-    fn raw_locale_keys(locale: Locale) -> std::collections::BTreeSet<String> {
+    #[test]
+    fn coordination_work_chrome_is_explicitly_localized() {
+        for locale in Locale::shipped_complete() {
+            if *locale == Locale::En {
+                continue;
+            }
+            assert_ne!(
+                tr(*locale, MessageId::CoordinationWorkTitle),
+                tr(Locale::En, MessageId::CoordinationWorkTitle),
+                "{} fell back to the English Coordination Work title",
+                locale.tag()
+            );
+            assert_ne!(
+                tr(*locale, MessageId::CoordinationMetricsNoAuthoritativeSource),
+                tr(
+                    Locale::En,
+                    MessageId::CoordinationMetricsNoAuthoritativeSource
+                ),
+                "{} fell back to the English coordination metrics note",
+                locale.tag()
+            );
+        }
+    }
+
+    fn raw_locale_messages(locale: Locale) -> serde_json::Map<String, serde_json::Value> {
         serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(locale_json_source(
             locale,
         ))
         .unwrap_or_else(|err| panic!("{} locale json should parse: {err}", locale.tag()))
-        .keys()
-        .cloned()
-        .collect()
+    }
+
+    fn raw_locale_keys(locale: Locale) -> std::collections::BTreeSet<String> {
+        raw_locale_messages(locale).keys().cloned().collect()
+    }
+
+    fn message_placeholders(value: &str) -> std::collections::BTreeSet<String> {
+        value
+            .split('{')
+            .skip(1)
+            .filter_map(|suffix| suffix.split_once('}').map(|(name, _)| name.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn coordination_complete_packs_have_raw_key_and_placeholder_parity() {
+        let english = raw_locale_messages(Locale::En);
+        let coordination_keys = english
+            .keys()
+            .filter(|key| key.starts_with("Coordination"))
+            .collect::<Vec<_>>();
+        assert_eq!(coordination_keys.len(), 39);
+
+        for locale in Locale::shipped_complete() {
+            let pack = raw_locale_messages(*locale);
+            for key in &coordination_keys {
+                let english_value = english
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("English {key} must be a string"));
+                let translated = pack
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("{} is missing raw key {key}", locale.tag()));
+                assert_eq!(
+                    message_placeholders(translated),
+                    message_placeholders(english_value),
+                    "{} changed placeholders for {key}",
+                    locale.tag()
+                );
+            }
+        }
     }
 
     /// `missing_message_ids` is blind to keys that exist in en but not in a
