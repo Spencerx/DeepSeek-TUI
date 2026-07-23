@@ -4338,6 +4338,29 @@ async fn run_event_loop(
         let allow_workspace_context_refresh =
             !app.is_loading && !has_running_agents && !app.is_compacting && !app.is_purging;
         workspace_context::refresh_if_needed(app, now, allow_workspace_context_refresh);
+        // Native git chrome: at most one background probe per cache TTL, never
+        // on the render path and never while a turn is live.
+        if allow_workspace_context_refresh {
+            static GIT_PROBE_LOCK: std::sync::OnceLock<std::sync::Mutex<Option<Instant>>> =
+                std::sync::OnceLock::new();
+            let slot = GIT_PROBE_LOCK.get_or_init(|| std::sync::Mutex::new(None));
+            let should_probe = slot
+                .lock()
+                .map(|mut last| {
+                    let due = last.is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
+                    if due {
+                        *last = Some(Instant::now());
+                    }
+                    due
+                })
+                .unwrap_or(false);
+            if should_probe {
+                let workspace = app.workspace.clone();
+                std::thread::spawn(move || {
+                    crate::tui::git_status::refresh_if_stale(&workspace);
+                });
+            }
+        }
 
         // Draw is gated by the frame-rate limiter (120 FPS cap). When a
         // redraw is needed but the limiter says we're inside the cooldown
@@ -12009,6 +12032,9 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     let classic_shell = app.ocean_treatment.is_classic();
     app.sidebar_hover = crate::tui::app::SidebarHoverState::default();
     app.viewport.last_approval_area = None;
+    // Keep the OSC-0 whale title truthful to the current shell phase so
+    // alt-tabbed sessions communicate state without a second in-app spinner.
+    crate::tui::underwater::sync_title_activity(app);
 
     // Clear entire area with the configured app background.
     let background = Block::default().style(Style::default().bg(app.ui_theme.surface_bg));
@@ -13557,6 +13583,37 @@ async fn handle_view_events(
                     view: Some(view),
                     selected_row_id,
                 });
+            }
+            ViewEvent::ModelPickerNeedsAuth {
+                provider,
+                model,
+                reason,
+            } => {
+                app.status_message = Some(reason);
+                // Close the model picker if it is still open, then hand off to
+                // the provider auth flow for the locked model's provider.
+                while app.view_stack.top_kind() == Some(ModalKind::ModelPicker) {
+                    let _ = app.view_stack.pop();
+                }
+                if let Some(picker) =
+                    crate::tui::provider_picker::ProviderPickerView::new_for_missing_auth(
+                        app.api_provider,
+                        provider,
+                        config,
+                        None,
+                    )
+                {
+                    app.view_stack.push(picker);
+                } else {
+                    app.status_message = Some(format!(
+                        "🔒 {model} needs {provider:?} credentials — open /provider to authenticate."
+                    ));
+                }
+                app.needs_redraw = true;
+            }
+            ViewEvent::StatusMessage { message } => {
+                app.status_message = Some(message);
+                app.needs_redraw = true;
             }
             ViewEvent::ProviderPickerDismissed {
                 catalog_view,

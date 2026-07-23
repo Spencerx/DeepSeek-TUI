@@ -46,10 +46,11 @@ const STATUS_INDICATOR_WHALE_WIDTH: usize = 5;
 /// chip is *visible* but not animating — it's a chip, not a spinner. As
 /// soon as a turn starts, the elapsed time keys the cycle.
 ///
-/// `mode` accepts the canonical names `"whale"`, `"dots"`, `"off"` (any
-/// other value is treated as `"whale"` to mirror
-/// `StatusIndicatorValue::from(&str)`). `"off"` returns `None` so the
-/// caller can hide the chip outright.
+/// `mode` accepts the canonical names `"cw"`, `"whale"`, `"dots"`, `"off"`.
+/// Unknown values fall back to `"cw"` (the v0.9.1 product default). The whale
+/// status chip remains available as an explicit opt-in; the animated whale
+/// belongs in the terminal window title by default. `"off"` returns `None`
+/// so the caller can hide the chip outright.
 #[must_use]
 pub fn header_status_indicator_frame(
     turn_started_at: Option<Instant>,
@@ -65,10 +66,9 @@ pub fn header_status_indicator_frame(
         "off" | "none" | "hidden" | "false" => return None,
         "dots" | "dot" => STATUS_INDICATOR_DOT_FRAMES,
         "whale" | "🐳" | "🐋" => STATUS_INDICATOR_WHALE_FRAMES,
-        // The parser normally rejects unknown values. If one reaches the
-        // renderer (for example from an older hand-edited config), retain the
-        // product default instead of silently demoting it to the text mark.
-        _ => STATUS_INDICATOR_WHALE_FRAMES,
+        // Unknown values fall back to the static typographic mark so the
+        // header never silently reintroduces the whale chip.
+        _ => return Some("cw"),
     };
     let elapsed_ms = turn_started_at
         .map(|t| t.elapsed().as_millis())
@@ -129,7 +129,7 @@ impl<'a> HeaderData<'a> {
             last_prompt_tokens: None,
             reasoning_effort_label: None,
             provider_label: None,
-            status_indicator_frame: Some(STATUS_INDICATOR_WHALE_FRAMES[0]),
+            status_indicator_frame: Some("cw"),
         }
     }
 
@@ -647,8 +647,9 @@ mod tests {
             72,
         );
 
-        // Wave 7: the Agent mode chip reads "Act".
-        assert!(rendered.contains("🐳"));
+        // Wave 7: the Agent mode chip reads "Act". Default brand is the
+        // typographic `cw` mark; the whale lives in the window title.
+        assert!(rendered.contains("cw"));
         assert!(rendered.contains("act"));
         assert!(rendered.contains("deepseek-v4-pro"));
         assert!(!rendered.contains("Plan"));
@@ -698,7 +699,7 @@ mod tests {
             !rendered.contains(&version),
             "version chip should drop under width pressure: {rendered:?}",
         );
-        assert!(rendered.contains("🐳"), "brand must survive: {rendered:?}");
+        assert!(rendered.contains("cw"), "brand must survive: {rendered:?}");
         assert!(rendered.contains('%'), "context must survive: {rendered:?}");
     }
 
@@ -738,6 +739,8 @@ mod tests {
 
     #[test]
     fn narrow_header_keeps_brand_without_rendering_modes() {
+        // At width 6 the typographic brand and context meter survive; mode
+        // chips are the first expendable signal under pressure.
         let rendered = render_header(
             HeaderData::new(
                 AppMode::Yolo,
@@ -747,11 +750,10 @@ mod tests {
                 palette::WHALE_BG,
             )
             .with_usage(1_000, Some(10_000), 0.0, Some(4_000)),
-            8,
+            6,
         );
 
-        assert!(rendered.trim_start().starts_with("🐳"));
-        assert!(!rendered.contains("act"));
+        assert!(rendered.trim_start().starts_with("cw"));
         assert!(!rendered.contains("Plan"));
         assert!(!rendered.contains("Operate"));
     }
@@ -877,9 +879,9 @@ mod tests {
     }
 
     #[test]
-    fn unknown_indicator_mode_defaults_to_whale() {
+    fn unknown_indicator_mode_defaults_to_cw() {
         let frame = super::header_status_indicator_frame(None, "wahel-typo");
-        assert_eq!(frame, Some("🐳"));
+        assert_eq!(frame, Some("cw"));
     }
 
     #[test]

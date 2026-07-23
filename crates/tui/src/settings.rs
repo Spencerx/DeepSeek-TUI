@@ -343,8 +343,16 @@ pub struct Settings {
     /// TUI-only Shift+Tab posture: ask, auto-review, or full-access.
     /// An explicit/managed `config.toml` approval policy always takes
     /// precedence, so this preference cannot loosen project requirements.
+    /// This is **tool-approval posture**, not filesystem scope — see
+    /// [`Self::sandbox_mode`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_posture: Option<String>,
+    /// Filesystem sandbox scope, independent of approval posture:
+    /// `read-only | workspace-write | danger-full-access | external-sandbox`.
+    /// Surfaced in Settings and the shell so "Full Access" (approval) is
+    /// never confused with unrestricted filesystem writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_mode: Option<String>,
     /// Per-provider model overrides. Key is provider name (e.g. "openai"),
     /// value is the model id. Takes precedence over `default_model`.
     pub provider_models: Option<std::collections::HashMap<String, String>>,
@@ -472,12 +480,13 @@ impl Default for Settings {
             default_model: None,
             reasoning_effort: None,
             permission_posture: None,
+            sandbox_mode: None,
             provider_models: None,
             enabled_models: None,
-            // The animated whale is the product mark while work is live. It
-            // remains on its first frame at rest, so the default has no idle
-            // redraw cost.
-            status_indicator: "whale".to_string(),
+            // The whale lives in the terminal window title (OSC 0). The in-app
+            // header defaults to the static typographic `cw` mark so the two
+            // surfaces do not compete with a second spinner.
+            status_indicator: "cw".to_string(),
             synchronized_output: "auto".to_string(),
             prefer_external_pdftotext: false,
             workspace_follow_symlinks: false,
@@ -681,6 +690,7 @@ impl Settings {
             if legacy_yolo_default && s.permission_posture.is_none() {
                 s.permission_posture = Some("full-access".to_string());
             }
+            s.sandbox_mode = s.sandbox_mode.as_deref().and_then(normalize_sandbox_mode);
             s
         };
         if migrate_legacy_file {
@@ -1100,6 +1110,14 @@ impl Settings {
                     );
                 }
             }
+            "sandbox_mode" | "sandbox" | "filesystem_sandbox" => {
+                self.sandbox_mode = normalize_sandbox_mode(value);
+                if self.sandbox_mode.is_none() {
+                    anyhow::bail!(
+                        "Failed to update setting: invalid sandbox_mode '{value}'. Expected: read-only, workspace-write, danger-full-access, or external-sandbox."
+                    );
+                }
+            }
             _ => {
                 anyhow::bail!("Failed to update setting: unknown setting '{key}'.");
             }
@@ -1241,6 +1259,10 @@ impl Settings {
             self.permission_posture
                 .as_deref()
                 .unwrap_or("(config/default)")
+        ));
+        lines.push(format!(
+            "  sandbox_mode:       {}  # filesystem scope (not approval)",
+            self.sandbox_mode.as_deref().unwrap_or("(config/default)")
         ));
         lines.push(String::new());
         lines.push(format!(
@@ -1608,6 +1630,22 @@ fn normalize_permission_posture(value: &str) -> Option<String> {
         "ask" | "suggest" | "on-request" | "untrusted" => Some("ask".to_string()),
         "auto" | "auto-review" | "auto_review" => Some("auto-review".to_string()),
         "full" | "full-access" | "full_access" | "bypass" => Some("full-access".to_string()),
+        _ => None,
+    }
+}
+
+/// Normalize filesystem sandbox mode. Distinct from permission posture.
+fn normalize_sandbox_mode(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "read-only" | "readonly" | "read_only" | "ro" => Some("read-only".to_string()),
+        "workspace-write" | "workspace_write" | "workspace" | "workspace-only" => {
+            Some("workspace-write".to_string())
+        }
+        "danger-full-access" | "danger_full_access" | "full-fs" | "full_filesystem"
+        | "filesystem-full" => Some("danger-full-access".to_string()),
+        "external-sandbox" | "external_sandbox" | "opensandbox" | "external" => {
+            Some("external-sandbox".to_string())
+        }
         _ => None,
     }
 }

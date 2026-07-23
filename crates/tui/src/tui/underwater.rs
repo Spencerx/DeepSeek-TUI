@@ -443,6 +443,50 @@ pub(crate) fn phase_marker(app: &App, phase: ShellPhase) -> (&'static str, Cow<'
     phase_marker_with_activity(app, phase, LiveActivity::from_app(app))
 }
 
+/// Truthful window-title activity verb for the OSC-0 whale animation.
+///
+/// Uses short English fragments (with fixed-width ellipsis) so alt-tabbed
+/// sessions stay legible without depending on the full localized phase strip.
+#[must_use]
+pub(crate) fn title_activity_verb(app: &App) -> &'static str {
+    let activity = LiveActivity::from_app(app);
+    let phase = ShellPhase::from_app_with_activity(app, activity);
+    match phase {
+        ShellPhase::Waiting | ShellPhase::Approval => "waiting on you…",
+        ShellPhase::Verifying => "verifying…",
+        ShellPhase::Done => "done",
+        ShellPhase::Failed => "failed",
+        ShellPhase::Typing => "drafting…",
+        ShellPhase::Idle => "idle",
+        ShellPhase::Working => match activity.kind() {
+            LiveActivityKind::Reasoning => "reasoning…",
+            LiveActivityKind::Reading => "reading…",
+            LiveActivityKind::UsingTool => "using tool…",
+            LiveActivityKind::Verifying => "verifying…",
+            LiveActivityKind::Working => "working…",
+        },
+    }
+}
+
+/// Push the current shell phase into the terminal title whale animation.
+pub(crate) fn sync_title_activity(app: &App) {
+    crate::tui::notifications::set_title_motion_enabled(
+        app.motion_policy().allows_decorative() && app.status_indicator != "off",
+    );
+    if app.is_loading
+        || matches!(
+            ShellPhase::from_app(app),
+            ShellPhase::Working
+                | ShellPhase::Verifying
+                | ShellPhase::Waiting
+                | ShellPhase::Approval
+                | ShellPhase::Typing
+        )
+    {
+        crate::tui::notifications::set_title_activity_verb(title_activity_verb(app));
+    }
+}
+
 pub(crate) fn phase_marker_with_activity(
     app: &App,
     phase: ShellPhase,
@@ -509,15 +553,37 @@ fn permission_label(app: &App) -> Cow<'static, str> {
     if app.mode == AppMode::Plan {
         return tr(locale, MessageId::ChipPermissionReadOnly);
     }
-    match app.approval_mode {
+    let approval = match app.approval_mode {
         ApprovalMode::Suggest => tr(locale, MessageId::ChipPermissionAsk),
         ApprovalMode::Auto => tr(locale, MessageId::ChipPermissionAuto),
         // Keep the effective permission explicit. `bypass` is an
         // implementation detail and, more importantly, can imply that
         // repository law no longer applies. Full Access never bypasses
-        // constitution rules.
+        // constitution rules. This is **tool-approval posture**, not
+        // filesystem scope — see filesystem_scope_label.
         ApprovalMode::Bypass => tr(locale, MessageId::ChipPermissionFullAccess),
         ApprovalMode::Never => tr(locale, MessageId::ChipPermissionNever),
+    };
+    // Append filesystem scope so "Full Access" (approval) is never confused
+    // with unrestricted disk writes.
+    let fs = filesystem_scope_label(app);
+    Cow::Owned(format!("{approval} · {fs}"))
+}
+
+/// Always-legible filesystem sandbox scope for the shell chrome.
+///
+/// Defaults to workspace-write (the safe product default). Callers that change
+/// sandbox mid-session should update the process env `CODEWHALE_SANDBOX_MODE`.
+#[must_use]
+fn filesystem_scope_label(_app: &App) -> Cow<'static, str> {
+    let mode = std::env::var("CODEWHALE_SANDBOX_MODE").unwrap_or_default();
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "read-only" | "readonly" | "read_only" => Cow::Borrowed("fs:read-only"),
+        "danger-full-access" | "danger_full_access" | "full" => Cow::Borrowed("fs:full"),
+        "external-sandbox" | "external_sandbox" | "opensandbox" => Cow::Borrowed("fs:external"),
+        "workspace-write" | "workspace_write" | "workspace" => Cow::Borrowed("fs:workspace"),
+        // Empty / unknown: product default is workspace-only.
+        _ => Cow::Borrowed("fs:workspace"),
     }
 }
 
@@ -850,6 +916,17 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
     ));
 
     let mut right = Vec::new();
+    // Cached git branch/status only — never probe from the render path.
+    // Background refresh is scheduled from the event loop / idle ticks.
+    if let Some(git_label) =
+        crate::tui::git_status::chrome_label(&crate::tui::git_status::cached_status())
+    {
+        right.push(Span::styled(
+            git_label,
+            Style::default().fg(app.ui_theme.text_muted),
+        ));
+        right.push(Span::raw("  "));
+    }
     if tier != ShellTier::Compact
         && let Some((used, max, percent)) = crate::tui::ui::context_usage_snapshot(app)
     {

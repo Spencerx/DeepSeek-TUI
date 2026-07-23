@@ -273,27 +273,82 @@ pub fn clear_taskbar_progress() {
 /// `start_title_animation()`, cleared by `stop_title_animation()`.
 static TITLE_ANIMATION_RUNNING: AtomicBool = AtomicBool::new(false);
 /// Focus reporting starts enabled before the event loop begins, so treating
-/// the terminal as focused is the safe default: never blink window chrome
-/// unless the terminal has explicitly reported `FocusLost`.
+/// the terminal as focused is the safe default: never flood window chrome
+/// unless the terminal has explicitly reported `FocusLost` or motion is on.
 static TERMINAL_FOCUSED: AtomicBool = AtomicBool::new(true);
+/// When false, the title keeps a static whale + state (reduced motion /
+/// status animation off) instead of cycling frames.
+static TITLE_MOTION_ENABLED: AtomicBool = AtomicBool::new(true);
 /// Invalidates a previous animation worker when a new turn starts or ends.
 static TITLE_ANIMATION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TITLE_ANIMATION_BASE: OnceLock<Mutex<String>> = OnceLock::new();
-const TITLE_FRAME_HOLD: Duration = Duration::from_millis(264);
-const TITLE_BRAILLE_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+static TITLE_ACTIVITY_VERB: OnceLock<Mutex<String>> = OnceLock::new();
+/// Whale frames restored from #1871 (`cd357de0c`). Cycle slowly so the
+/// terminal title communicates life without competing with in-app spinners.
+const TITLE_FRAME_HOLD: Duration = Duration::from_millis(800);
+const TITLE_WHALE_FRAMES: &[&str] = &["🐳", "🐋", "🐳", "🐋"];
 
 fn title_animation_base() -> &'static Mutex<String> {
     TITLE_ANIMATION_BASE.get_or_init(|| Mutex::new("Codewhale".to_string()))
 }
 
-#[must_use]
-fn title_activity_label(base: &str, elapsed: Duration, focused: bool) -> String {
-    if focused {
-        return format!("› {base}");
+fn title_activity_verb() -> &'static Mutex<String> {
+    TITLE_ACTIVITY_VERB.get_or_init(|| Mutex::new("working…".to_string()))
+}
+
+/// Configure whether the title whale cycles frames.
+///
+/// Call once at startup (and whenever motion settings change). Reduced motion
+/// and `status_indicator = "off"` both freeze the title to a single whale.
+pub fn set_title_motion_enabled(enabled: bool) {
+    TITLE_MOTION_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// Update the truthful activity verb shown next to the title whale
+/// (`working…`, `reasoning…`, `using tool…`, `verifying…`, `waiting on you…`).
+pub fn set_title_activity_verb(verb: &str) {
+    let verb = verb.trim();
+    if verb.is_empty() {
+        return;
     }
-    let frame = TITLE_BRAILLE_FRAMES[(elapsed.as_millis() / TITLE_FRAME_HOLD.as_millis()) as usize
-        % TITLE_BRAILLE_FRAMES.len()];
-    format!("{frame} {base}")
+    if let Ok(mut slot) = title_activity_verb().lock() {
+        if slot.as_str() == verb {
+            return;
+        }
+        verb.clone_into(&mut *slot);
+    }
+    if !TITLE_ANIMATION_RUNNING.load(Ordering::SeqCst) {
+        return;
+    }
+    let base = title_animation_base()
+        .lock()
+        .map_or_else(|_| "Codewhale".to_string(), |base| base.clone());
+    set_terminal_title(&title_activity_label(
+        &base,
+        Duration::ZERO,
+        TERMINAL_FOCUSED.load(Ordering::SeqCst),
+        TITLE_MOTION_ENABLED.load(Ordering::SeqCst),
+    ));
+}
+
+#[must_use]
+fn title_activity_label(base: &str, elapsed: Duration, focused: bool, motion: bool) -> String {
+    let verb = title_activity_verb()
+        .lock()
+        .map_or_else(|_| "working…".to_string(), |v| v.clone());
+    let body = if verb.is_empty() {
+        base.to_string()
+    } else {
+        verb
+    };
+    // Static title when motion is off or the window is focused: one whale +
+    // state, no competing spinner in the focused app chrome.
+    if !motion || focused {
+        return format!("🐳 {body}");
+    }
+    let frame = TITLE_WHALE_FRAMES
+        [(elapsed.as_millis() / TITLE_FRAME_HOLD.as_millis()) as usize % TITLE_WHALE_FRAMES.len()];
+    format!("{frame} {body}")
 }
 
 /// Write OSC 0 (set window title) sequence.
@@ -308,13 +363,19 @@ fn set_terminal_title(title: &str) {
 /// `reset_title_on_interaction()` can skip redundant writes.
 static COMPLETION_MARKER_SHOWN: AtomicBool = AtomicBool::new(false);
 
-/// Mark the terminal title as active. The title stays static while the
-/// terminal is focused; after `FocusLost`, a one-column Braille frame advances
-/// on a deliberately slow divisor so debounced terminals are not flooded with
-/// OSC 0 writes.
+/// Mark the terminal title as active with the animated whale + state verb.
+///
+/// While focused (or under reduced motion), the title stays a static whale
+/// with the current verb. After `FocusLost` with motion enabled, the whale
+/// frames cycle so alt-tabbed sessions still communicate progress.
 pub fn start_title_animation(original: &str) {
     if let Ok(mut base) = title_animation_base().lock() {
         original.clone_into(&mut base);
+    }
+    if let Ok(mut verb) = title_activity_verb().lock() {
+        if verb.is_empty() {
+            "working…".clone_into(&mut *verb);
+        }
     }
     COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);
     TITLE_ANIMATION_RUNNING.store(true, Ordering::SeqCst);
@@ -322,7 +383,13 @@ pub fn start_title_animation(original: &str) {
         .fetch_add(1, Ordering::SeqCst)
         .saturating_add(1);
     let focused = TERMINAL_FOCUSED.load(Ordering::SeqCst);
-    set_terminal_title(&title_activity_label(original, Duration::ZERO, focused));
+    let motion = TITLE_MOTION_ENABLED.load(Ordering::SeqCst);
+    set_terminal_title(&title_activity_label(
+        original,
+        Duration::ZERO,
+        focused,
+        motion,
+    ));
 
     let base = original.to_string();
     std::thread::spawn(move || {
@@ -334,8 +401,17 @@ pub fn start_title_animation(original: &str) {
             {
                 break;
             }
-            if !TERMINAL_FOCUSED.load(Ordering::SeqCst) {
-                set_terminal_title(&title_activity_label(&base, started_at.elapsed(), false));
+            let motion = TITLE_MOTION_ENABLED.load(Ordering::SeqCst);
+            // Only advance frames when unfocused + motion is on. Focused
+            // windows keep the static whale so the title is not a second
+            // spinner competing with in-app activity chrome.
+            if motion && !TERMINAL_FOCUSED.load(Ordering::SeqCst) {
+                set_terminal_title(&title_activity_label(
+                    &base,
+                    started_at.elapsed(),
+                    false,
+                    true,
+                ));
             }
         }
     });
@@ -343,9 +419,9 @@ pub fn start_title_animation(original: &str) {
 
 /// Update the focus gate used by the title activity signal.
 ///
-/// Focus gain immediately restores the steady active marker. Focus loss emits
+/// Focus gain immediately restores the steady whale + verb. Focus loss emits
 /// the first animation frame immediately, then the worker advances it at the
-/// debounced cadence.
+/// debounced whale cadence.
 pub fn set_terminal_focused(focused: bool) {
     TERMINAL_FOCUSED.store(focused, Ordering::SeqCst);
     if !TITLE_ANIMATION_RUNNING.load(Ordering::SeqCst) {
@@ -354,24 +430,27 @@ pub fn set_terminal_focused(focused: bool) {
     let base = title_animation_base()
         .lock()
         .map_or_else(|_| "Codewhale".to_string(), |base| base.clone());
-    set_terminal_title(&title_activity_label(&base, Duration::ZERO, focused));
+    let motion = TITLE_MOTION_ENABLED.load(Ordering::SeqCst);
+    set_terminal_title(&title_activity_label(
+        &base,
+        Duration::ZERO,
+        focused,
+        motion,
+    ));
 }
 
 /// Stop the title animation and show a completion marker.
 ///
-/// Sets the title to `✓ <base>` so alt-tabbed users see at a glance
-/// that processing finished. The marker is overwritten on the next turn
-/// by [`start_title_animation`].
+/// Sets the title to `✓ done` so alt-tabbed users see at a glance that
+/// processing finished. The marker is overwritten on the next turn by
+/// [`start_title_animation`].
 pub fn stop_title_animation() {
     TITLE_ANIMATION_RUNNING.store(false, Ordering::SeqCst);
     TITLE_ANIMATION_GENERATION.fetch_add(1, Ordering::SeqCst);
-    COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);
-    // Show a completion marker only for beep mode. Bell mode already has its own
-    // terminal-level visual indicator (flash/icon).
-    let mode = COMPLETION_SOUND_MODE.load(Ordering::SeqCst);
-    if mode == 1 {
-        set_terminal_title("✓ Codewhale");
-    }
+    // Always show the completion marker so quiet-sound modes still communicate
+    // finish state in the window title; interaction clears it.
+    COMPLETION_MARKER_SHOWN.store(true, Ordering::SeqCst);
+    set_terminal_title("✓ done");
     play_completion_sound();
 }
 
@@ -813,34 +892,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn title_spinner_is_focus_gated_and_uses_a_slow_divisor() {
+    fn title_whale_is_static_when_focused_or_motion_disabled() {
+        if let Ok(mut verb) = title_activity_verb().lock() {
+            "working…".clone_into(&mut *verb);
+        }
         assert_eq!(
-            title_activity_label("Codewhale", Duration::ZERO, true),
-            "› Codewhale"
+            title_activity_label("Codewhale", Duration::ZERO, true, true),
+            "🐳 working…"
         );
         assert_eq!(
-            title_activity_label("Codewhale", Duration::ZERO, false),
-            "⠋ Codewhale"
+            title_activity_label("Codewhale", Duration::ZERO, false, false),
+            "🐳 working…"
         );
         assert_eq!(
-            title_activity_label("Codewhale", Duration::from_millis(263), false),
-            "⠋ Codewhale"
+            title_activity_label("Codewhale", Duration::ZERO, false, true),
+            "🐳 working…"
         );
         assert_eq!(
-            title_activity_label("Codewhale", Duration::from_millis(264), false),
-            "⠙ Codewhale"
+            title_activity_label("Codewhale", Duration::from_millis(800), false, true),
+            "🐋 working…"
         );
     }
 
     #[test]
-    fn title_spinner_frames_are_single_column_with_ascii_fallbacks() {
-        use unicode_width::UnicodeWidthStr;
-
-        for frame in TITLE_BRAILLE_FRAMES {
-            assert_eq!(frame.width(), 1, "title frame {frame:?} must not shift");
-            let ch = frame.chars().next().expect("one Braille glyph");
-            assert!(crate::tui::glyphs::braille_ascii_fallback(ch).is_some());
-        }
+    fn title_whale_frames_are_the_restored_emoji_pair() {
+        assert_eq!(TITLE_WHALE_FRAMES, &["🐳", "🐋", "🐳", "🐋"]);
+        assert_eq!(TITLE_FRAME_HOLD, Duration::from_millis(800));
     }
 
     /// Serialise tests that mutate process-global environment or notification
