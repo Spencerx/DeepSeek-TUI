@@ -1752,6 +1752,9 @@ pub struct HuntState {
     pub tokens_used: u64,
     pub time_used_seconds: u64,
     pub continuation_count: u32,
+    /// Why an unfinished goal is paused. Kept separate from the four-state
+    /// hunt verdict so usage, budget, and run-limit stops stay distinguishable.
+    pub pause_reason: Option<crate::tools::goal::GoalPauseReason>,
     pub started_at: Option<Instant>,
     /// When the goal reached a terminal verdict (Hunted/Wounded/Escaped).
     /// While `None`, elapsed time keeps growing; once set, the sidebar freezes

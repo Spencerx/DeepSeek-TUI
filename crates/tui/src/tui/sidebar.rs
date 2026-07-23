@@ -565,6 +565,11 @@ fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
             Some("(Pausing)".to_string())
         } else if app.paused || app.paused_quarry.is_some() {
             Some("(Paused)".to_string())
+        } else if app.hunt.verdict == HuntVerdict::Wounded {
+            Some(match app.hunt.pause_reason {
+                Some(reason) => format!("(Paused: {})", reason.label()),
+                None => "(Paused)".to_string(),
+            })
         } else {
             None
         }
@@ -578,7 +583,8 @@ fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
         summary.goal_finished_at = app.hunt.finished_at;
         summary.tokens_used = app.session.total_conversation_tokens;
         summary.pause_indicator = live_pause_indicator(app);
-        summary.workflow_paused = app.paused || app.paused_quarry.is_some();
+        summary.workflow_paused =
+            app.paused || app.paused_quarry.is_some() || app.hunt.verdict == HuntVerdict::Wounded;
     }
 
     let fresh = (|| {
@@ -608,7 +614,9 @@ fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
             // but it is not a second user-facing progress surface.
             state_updating: false,
             pause_indicator: live_pause_indicator(app),
-            workflow_paused: app.paused || app.paused_quarry.is_some(),
+            workflow_paused: app.paused
+                || app.paused_quarry.is_some()
+                || app.hunt.verdict == HuntVerdict::Wounded,
         };
         apply_live_goal_state(&mut summary, app);
         Some(summary)
@@ -4345,6 +4353,22 @@ mod tests {
             Some("Scan nested git repositories")
         );
         assert_eq!(summary.pause_indicator.as_deref(), Some("(Paused)"));
+        assert!(summary.workflow_paused);
+    }
+
+    #[test]
+    fn sidebar_names_goal_pause_reason() {
+        let mut app = create_test_app();
+        app.hunt.quarry = Some("Finish within budget".to_string());
+        app.hunt.verdict = HuntVerdict::Wounded;
+        app.hunt.pause_reason = Some(crate::tools::goal::GoalPauseReason::BudgetLimit);
+
+        let summary = sidebar_work_summary(&mut app);
+
+        assert_eq!(
+            summary.pause_indicator.as_deref(),
+            Some("(Paused: budget limit)")
+        );
         assert!(summary.workflow_paused);
     }
 

@@ -1484,7 +1484,7 @@ async fn unsaturated_goal_control_runs_before_ready_idle_child_completion() {
 }
 
 #[tokio::test]
-async fn cross_turn_token_budget_exhaustion_blocks_goal_and_refreshes_prompt() {
+async fn cross_turn_token_budget_exhaustion_pauses_goal_and_refreshes_prompt() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     let budget_turn = vec![
@@ -1577,26 +1577,24 @@ async fn cross_turn_token_budget_exhaustion_blocks_goal_and_refreshes_prompt() {
                 };
                 assert!(
                     !prompt.contains("<session_goal>"),
-                    "blocked budget goal must leave the active system prompt: {prompt}"
+                    "paused budget goal must leave the active system prompt: {prompt}"
                 );
                 saw_prompt_refresh = true;
             }
-            Event::GoalUpdated { snapshot } if snapshot.status == "blocked" => {
+            Event::GoalUpdated { snapshot } if snapshot.status == "paused" => {
                 assert_eq!(snapshot.objective.as_deref(), Some("finish within budget"));
                 assert_eq!(snapshot.token_budget, Some(10));
                 assert_eq!(snapshot.tokens_used, 11);
-                assert!(
-                    snapshot
-                        .blocker
-                        .as_deref()
-                        .is_some_and(|blocker| blocker.contains("token budget reached")),
-                    "{snapshot:?}"
+                assert_eq!(
+                    snapshot.pause_reason,
+                    Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
                 );
+                assert!(snapshot.blocker.is_none(), "{snapshot:?}");
                 saw_terminal_goal = true;
             }
-            Event::Status { message } if message.contains("automatic continuation stopped") => {
+            Event::Status { message } if message.contains("automatic continuation paused") => {
                 assert!(message.contains("11 / 10 tokens"), "{message}");
-                assert!(message.contains("goal is blocked"), "{message}");
+                assert!(message.contains("Raise the budget"), "{message}");
                 saw_budget_status = true;
             }
             _ => {}
@@ -1617,7 +1615,11 @@ async fn cross_turn_token_budget_exhaustion_blocks_goal_and_refreshes_prompt() {
     };
     assert!(!prompt.contains("<session_goal>"), "{prompt}");
     let snapshot = goal_state.lock().expect("goal lock").snapshot();
-    assert_eq!(snapshot.status, "blocked");
+    assert_eq!(snapshot.status, "paused");
+    assert_eq!(
+        snapshot.pause_reason,
+        Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
+    );
     assert_eq!(starts, 1, "budget stop must not start another turn");
     assert_eq!(
         model.call_count(),
@@ -1686,7 +1688,7 @@ async fn current_turn_usage_stops_budgeted_goal_after_one_provider_call() {
         .expect("current-turn budget stop did not settle")
         .expect("current-turn budget event");
         if let Event::GoalUpdated { snapshot } = event
-            && snapshot.status == "blocked"
+            && snapshot.status == "paused"
         {
             saw_terminal_goal = true;
         }
@@ -1703,16 +1705,14 @@ async fn current_turn_usage_stops_budgeted_goal_after_one_provider_call() {
     );
     assert_eq!(model.remaining_turns(), 0);
     let goal = goal_state.lock().expect("goal lock").snapshot();
-    assert_eq!(goal.status, "blocked");
+    assert_eq!(goal.status, "paused");
     assert_eq!(goal.tokens_used, 11);
     assert_eq!(goal.token_budget, Some(10));
-    assert!(
-        goal.blocker
-            .as_deref()
-            .is_some_and(|blocker| blocker.contains("11 / 10 tokens")),
-        "{goal:?}"
+    assert_eq!(
+        goal.pause_reason,
+        Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
     );
-    let prompt = system_prompt_text(session.system_prompt.expect("blocked system prompt"));
+    let prompt = system_prompt_text(session.system_prompt.expect("paused system prompt"));
     assert!(!prompt.contains("<session_goal>"), "{prompt}");
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
@@ -1785,7 +1785,7 @@ async fn tool_response_crossing_goal_budget_does_not_issue_second_provider_reque
                 assert!(result.expect("get_goal result").success);
                 saw_get_goal = true;
             }
-            Event::GoalUpdated { snapshot } if snapshot.status == "blocked" => {
+            Event::GoalUpdated { snapshot } if snapshot.status == "paused" => {
                 saw_terminal_goal = true;
             }
             _ => {}
@@ -1804,20 +1804,18 @@ async fn tool_response_crossing_goal_budget_does_not_issue_second_provider_reque
         "the second canned response must remain unused"
     );
     let goal = goal_state.lock().expect("goal lock").snapshot();
-    assert_eq!(goal.status, "blocked");
+    assert_eq!(goal.status, "paused");
     assert_eq!(goal.tokens_used, 11, "usage must be durably recorded once");
     assert_eq!(goal.token_budget, Some(10));
-    assert!(
-        goal.blocker
-            .as_deref()
-            .is_some_and(|blocker| blocker.contains("11 / 10 tokens")),
-        "{goal:?}"
+    assert_eq!(
+        goal.pause_reason,
+        Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
     );
     let session = handle
         .get_session_snapshot()
         .await
         .expect("post-budget tool session snapshot");
-    let prompt = system_prompt_text(session.system_prompt.expect("blocked system prompt"));
+    let prompt = system_prompt_text(session.system_prompt.expect("paused system prompt"));
     assert!(!prompt.contains("<session_goal>"), "{prompt}");
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
@@ -1957,7 +1955,7 @@ fn without_named_custom_route(mut config: Config) -> Config {
 }
 
 #[tokio::test]
-async fn exhausted_goal_terminalizes_before_invalid_route_resolution() {
+async fn exhausted_goal_pauses_before_invalid_route_resolution() {
     let config = goal_custom_route_config();
     let engine_config = EngineConfig {
         model: "local-model".to_string(),
@@ -1988,9 +1986,9 @@ async fn exhausted_goal_terminalizes_before_invalid_route_resolution() {
         .await
         .expect("queue exhausted continuation");
 
-    let mut saw_blocked_goal = false;
+    let mut saw_paused_goal = false;
     let mut saw_budget_status = false;
-    while !(saw_blocked_goal && saw_budget_status) {
+    while !(saw_paused_goal && saw_budget_status) {
         let event = tokio::time::timeout(model_turn_event_timeout(), async {
             handle.rx_event.write().await.recv().await
         })
@@ -2004,10 +2002,14 @@ async fn exhausted_goal_terminalizes_before_invalid_route_resolution() {
             Event::Error { envelope, .. } => {
                 panic!("budget decision must precede route failure: {envelope:?}")
             }
-            Event::GoalUpdated { snapshot } if snapshot.status == "blocked" => {
+            Event::GoalUpdated { snapshot } if snapshot.status == "paused" => {
                 assert_eq!(snapshot.tokens_used, 11);
                 assert_eq!(snapshot.token_budget, Some(10));
-                saw_blocked_goal = true;
+                assert_eq!(
+                    snapshot.pause_reason,
+                    Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
+                );
+                saw_paused_goal = true;
             }
             Event::Status { message } if message.contains("Goal token budget reached") => {
                 assert!(message.contains("11 / 10 tokens"), "{message}");
@@ -2032,8 +2034,70 @@ async fn exhausted_goal_terminalizes_before_invalid_route_resolution() {
     assert!(!prompt.contains("<session_goal>"), "{prompt}");
     assert_eq!(
         goal_state.lock().expect("goal lock").snapshot().status,
-        "blocked"
+        "paused"
     );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn continuation_circuit_breaker_pauses_with_run_limit_reason() {
+    let config = Config::default();
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            goal_objective: Some("stop a runaway continuation loop".to_string()),
+            ..EngineConfig::default()
+        },
+        &config,
+    );
+    let goal_state = engine.config.goal_state.clone();
+    {
+        let mut goal = goal_state.lock().expect("goal lock");
+        for _ in 0..crate::goal_loop::MAX_GOAL_CONTINUATIONS {
+            goal.record_continuation();
+        }
+    }
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::ContinueGoal {
+            dynamic_tools: Vec::new(),
+            engine_schedule_id: None,
+        })
+        .await
+        .expect("queue capped continuation");
+
+    let mut saw_pause = false;
+    let mut saw_reason = false;
+    while !(saw_pause && saw_reason) {
+        let event = tokio::time::timeout(model_turn_event_timeout(), async {
+            handle.rx_event.write().await.recv().await
+        })
+        .await
+        .expect("continuation cap event timeout")
+        .expect("continuation cap event");
+        match event {
+            Event::TurnStarted { .. } => panic!("capped goal must not start another turn"),
+            Event::GoalUpdated { snapshot } if snapshot.status == "paused" => {
+                assert_eq!(
+                    snapshot.pause_reason,
+                    Some(crate::tools::goal::GoalPauseReason::Backoff)
+                );
+                saw_pause = true;
+            }
+            Event::Status { message } if message.contains("automatic continuations") => {
+                assert!(
+                    message.contains(&crate::goal_loop::MAX_GOAL_CONTINUATIONS.to_string()),
+                    "{message}"
+                );
+                saw_reason = true;
+            }
+            _ => {}
+        }
+    }
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");

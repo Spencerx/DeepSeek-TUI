@@ -6527,6 +6527,7 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
         elapsed_seconds: Some(12),
         evidence: Some("focused tests passed".to_string()),
         blocker: None,
+        pause_reason: None,
         completion_verification: Some(crate::tools::goal::GoalCompletionVerification {
             status: "passed".to_string(),
             check: "cargo test".to_string(),
@@ -6559,6 +6560,7 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
         elapsed_seconds: Some(1),
         evidence: None,
         blocker: Some("needs user approval".to_string()),
+        pause_reason: None,
         completion_verification: None,
     };
 
@@ -6589,6 +6591,7 @@ fn canonical_goal_clear_wins_after_stale_active_snapshot() {
         elapsed_seconds: Some(5),
         evidence: None,
         blocker: None,
+        pause_reason: None,
         completion_verification: None,
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &stale_active));
@@ -6606,6 +6609,7 @@ fn canonical_goal_clear_wins_after_stale_active_snapshot() {
         elapsed_seconds: None,
         evidence: None,
         blocker: None,
+        pause_reason: None,
         completion_verification: None,
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &cleared));
@@ -6654,6 +6658,7 @@ fn apply_goal_snapshot_resume_clears_frozen_timer() {
         elapsed_seconds: Some(0),
         evidence: Some("done".to_string()),
         blocker: None,
+        pause_reason: None,
         completion_verification: Some(crate::tools::goal::GoalCompletionVerification {
             status: "passed".to_string(),
             check: "cargo test".to_string(),
@@ -6676,6 +6681,7 @@ fn apply_goal_snapshot_resume_clears_frozen_timer() {
         elapsed_seconds: Some(0),
         evidence: None,
         blocker: None,
+        pause_reason: None,
         completion_verification: None,
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &resumed));
@@ -6704,10 +6710,15 @@ fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
         elapsed_seconds: Some(10),
         evidence: None,
         blocker: None,
+        pause_reason: Some(crate::tools::goal::GoalPauseReason::User),
         completion_verification: None,
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &paused));
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Wounded);
+    assert_eq!(
+        app.hunt.pause_reason,
+        Some(crate::tools::goal::GoalPauseReason::User)
+    );
     let frozen_at = app
         .hunt
         .finished_at
@@ -6726,6 +6737,7 @@ fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
         elapsed_seconds: Some(25),
         evidence: None,
         blocker: None,
+        pause_reason: Some(crate::tools::goal::GoalPauseReason::User),
         completion_verification: None,
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &paused_with_usage));
@@ -6747,10 +6759,12 @@ fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
         elapsed_seconds: Some(25),
         evidence: None,
         blocker: None,
+        pause_reason: None,
         completion_verification: None,
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &resumed));
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);
+    assert_eq!(app.hunt.pause_reason, None);
     assert!(
         app.hunt.finished_at.is_none(),
         "resuming a paused goal should re-arm the elapsed timer"

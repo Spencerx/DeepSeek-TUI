@@ -47,7 +47,9 @@ use crate::route_runtime::{
     ResolvedRuntimeRoute, ValidatedRuntimeRoute, resolve_runtime_route_for_identity,
 };
 use crate::seam_manager::{SeamConfig, SeamManager};
-use crate::tools::goal::{GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state};
+use crate::tools::goal::{
+    GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state,
+};
 use crate::tools::plan::{SharedPlanState, new_shared_plan_state};
 use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
 use crate::tools::spec::{
@@ -670,6 +672,7 @@ enum GoalContinuationAction {
     },
     Stopped {
         message: String,
+        reason: GoalPauseReason,
     },
 }
 
@@ -1793,8 +1796,8 @@ impl Engine {
                             GoalContinuationAction::Dispatch { content, snapshot } => {
                                 (content, *snapshot)
                             }
-                            GoalContinuationAction::Stopped { message } => {
-                                self.block_goal_continuation(message).await;
+                            GoalContinuationAction::Stopped { message, reason } => {
+                                self.pause_goal_continuation(reason, message).await;
                                 continue;
                             }
                         };
@@ -2869,26 +2872,38 @@ impl Engine {
             }
             crate::goal_loop::ContinuationDecision::Stop(reason) => {
                 tracing::info!(?reason, "goal continuation stopped");
-                let message = match reason {
-                    crate::goal_loop::StopReason::TokenBudget => format!(
-                        "Goal token budget reached ({} / {} tokens); automatic continuation stopped and the goal is blocked.",
-                        snapshot.tokens_used,
-                        snapshot.token_budget.unwrap_or_default(),
+                let (message, pause_reason) = match reason {
+                    crate::goal_loop::StopReason::TokenBudget => (
+                        format!(
+                            "Goal token budget reached ({} / {} tokens); automatic continuation paused. Raise the budget, then resume the goal.",
+                            snapshot.tokens_used,
+                            snapshot.token_budget.unwrap_or_default(),
+                        ),
+                        GoalPauseReason::BudgetLimit,
                     ),
-                    crate::goal_loop::StopReason::TimeBudget => format!(
-                        "Goal time budget reached ({} seconds); automatic continuation stopped and the goal is blocked.",
-                        snapshot.time_used_seconds,
+                    crate::goal_loop::StopReason::TimeBudget => (
+                        format!(
+                            "Goal time budget reached ({} seconds); automatic continuation paused.",
+                            snapshot.time_used_seconds,
+                        ),
+                        GoalPauseReason::BudgetLimit,
                     ),
-                    crate::goal_loop::StopReason::ContinuationLimit => {
-                        "Goal continuation limit reached; automatic continuation stopped and the goal is blocked."
-                            .to_string()
-                    }
+                    crate::goal_loop::StopReason::ContinuationLimit => (
+                        format!(
+                            "Goal paused after {} automatic continuations without a terminal result; inspect progress, then resume if useful.",
+                            crate::goal_loop::MAX_GOAL_CONTINUATIONS,
+                        ),
+                        GoalPauseReason::Backoff,
+                    ),
                     crate::goal_loop::StopReason::Completed
                     | crate::goal_loop::StopReason::Blocked => {
                         return GoalContinuationAction::Inactive;
                     }
                 };
-                GoalContinuationAction::Stopped { message }
+                GoalContinuationAction::Stopped {
+                    message,
+                    reason: pause_reason,
+                }
             }
         }
     }
@@ -2993,14 +3008,26 @@ impl Engine {
     /// still-active goal so the sidebar and stable prompt do not claim that an
     /// autonomous run remains live, and require an explicit `/goal resume`.
     async fn pause_goal_after_interruption(&mut self) {
+        self.pause_goal_continuation(
+            GoalPauseReason::User,
+            "Goal paused because its model turn was interrupted; use /goal resume to continue."
+                .to_string(),
+        )
+        .await;
+    }
+
+    /// Pause a still-active goal with an inspectable reason and publish every
+    /// host projection in one ordered path.
+    async fn pause_goal_continuation(&mut self, reason: GoalPauseReason, message: String) {
         let snapshot = match self.config.goal_state.lock() {
             Ok(mut state) => {
                 if !state.is_active() {
                     return;
                 }
-                let objective = state.objective().map(str::to_string);
-                let budget = state.token_budget();
-                state.sync_from_host_status(objective.as_deref(), budget, GoalStatus::Paused);
+                if let Err(err) = state.mark_paused(reason) {
+                    tracing::warn!("failed to pause goal continuation: {err}");
+                    return;
+                }
                 state.snapshot()
             }
             Err(err) => {
@@ -3015,13 +3042,7 @@ impl Engine {
         self.refresh_system_prompt();
         self.emit_session_updated().await;
         let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
-        let _ = self
-            .tx_event
-            .send(Event::status(
-                "Goal paused because its model turn was interrupted; use /goal resume to continue."
-                    .to_string(),
-            ))
-            .await;
+        let _ = self.tx_event.send(Event::status(message)).await;
     }
 
     /// Handle `/goal pause|resume|clear|complete|blocked` by writing the new

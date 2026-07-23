@@ -9232,6 +9232,7 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         || app.hunt.tokens_used != snapshot.tokens_used
         || app.hunt.time_used_seconds != snapshot.time_used_seconds
         || app.hunt.continuation_count != snapshot.continuation_count
+        || app.hunt.pause_reason != snapshot.pause_reason
         || app.hunt.verdict != verdict;
     if !changed {
         return false;
@@ -9242,6 +9243,7 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
     app.hunt.tokens_used = snapshot.tokens_used;
     app.hunt.time_used_seconds = snapshot.time_used_seconds;
     app.hunt.continuation_count = snapshot.continuation_count;
+    app.hunt.pause_reason = snapshot.pause_reason;
     app.hunt.verdict = verdict;
     if objective_changed || app.hunt.started_at.is_none() {
         app.hunt.started_at = Some(Instant::now());

@@ -18,9 +18,8 @@ use crate::tools::spec::{
 
 /// Maximum number of automatic goal-continuation prompt injections in one
 /// engine turn. This is intra-turn granularity only — it prevents a stuck spin
-/// within a single turn from making no progress. The cross-turn loop has **no
-/// cap**: a goal runs until complete/blocked/paused, or an optional budget is
-/// exhausted. See `goal_loop::decide_continuation`.
+/// within a single turn from making no progress. The cross-turn loop has its
+/// own conservative circuit breaker; see `goal_loop::decide_continuation`.
 pub const MAX_GOAL_CONTINUATIONS_PER_TURN: u32 = 3;
 
 /// Shared reference to the current runtime goal.
@@ -65,6 +64,28 @@ impl GoalStatus {
     }
 }
 
+/// Why an otherwise unfinished goal is paused.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalPauseReason {
+    User,
+    Backoff,
+    UsageLimit,
+    BudgetLimit,
+}
+
+impl GoalPauseReason {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Backoff => "run limit",
+            Self::UsageLimit => "usage limit",
+            Self::BudgetLimit => "budget limit",
+        }
+    }
+}
+
 /// Session-local goal state. `Instant` stays runtime-only; snapshots expose
 /// elapsed seconds so tool output remains serializable and stable.
 #[derive(Debug, Clone, Default)]
@@ -79,6 +100,7 @@ pub struct GoalState {
     finished_at: Option<Instant>,
     evidence: Option<String>,
     blocker: Option<String>,
+    pause_reason: Option<GoalPauseReason>,
     completion_verification: Option<GoalCompletionVerification>,
 }
 
@@ -123,6 +145,7 @@ impl GoalState {
                     self.started_at = Some(Instant::now());
                     self.evidence = None;
                     self.blocker = None;
+                    self.pause_reason = None;
                     self.completion_verification = None;
                 } else if self.token_budget != token_budget {
                     self.token_budget = token_budget;
@@ -131,11 +154,17 @@ impl GoalState {
                 if resumed {
                     self.evidence = None;
                     self.blocker = None;
+                    self.pause_reason = None;
                     self.completion_verification = None;
                 }
 
                 if changed || status_changed || self.status.is_none() {
                     self.status = Some(status);
+                    self.pause_reason = if status == GoalStatus::Paused {
+                        Some(GoalPauseReason::User)
+                    } else {
+                        None
+                    };
                     self.finished_at = if status == GoalStatus::Active {
                         None
                     } else {
@@ -167,6 +196,7 @@ impl GoalState {
         self.finished_at = None;
         self.evidence = None;
         self.blocker = None;
+        self.pause_reason = None;
         self.completion_verification = None;
         Ok(())
     }
@@ -196,6 +226,7 @@ impl GoalState {
         self.finished_at = Some(Instant::now());
         self.evidence = Some(evidence);
         self.blocker = None;
+        self.pause_reason = None;
         self.completion_verification = Some(verification);
         Ok(())
     }
@@ -208,6 +239,20 @@ impl GoalState {
         self.finished_at = Some(Instant::now());
         self.blocker = Some(blocker);
         self.evidence = None;
+        self.pause_reason = None;
+        self.completion_verification = None;
+        Ok(())
+    }
+
+    pub fn mark_paused(&mut self, reason: GoalPauseReason) -> Result<(), &'static str> {
+        if self.objective.is_none() {
+            return Err("No active goal exists to pause.");
+        }
+        self.status = Some(GoalStatus::Paused);
+        self.finished_at = Some(Instant::now());
+        self.pause_reason = Some(reason);
+        self.evidence = None;
+        self.blocker = None;
         self.completion_verification = None;
         Ok(())
     }
@@ -241,6 +286,7 @@ impl GoalState {
             elapsed_seconds,
             evidence: self.evidence.clone(),
             blocker: self.blocker.clone(),
+            pause_reason: self.pause_reason,
             completion_verification: self.completion_verification.clone(),
         }
     }
@@ -258,6 +304,7 @@ pub struct GoalSnapshot {
     pub elapsed_seconds: Option<u64>,
     pub evidence: Option<String>,
     pub blocker: Option<String>,
+    pub pause_reason: Option<GoalPauseReason>,
     pub completion_verification: Option<GoalCompletionVerification>,
 }
 
@@ -276,11 +323,10 @@ impl GoalSnapshot {
 
     #[must_use]
     pub fn from_thread_goal(goal: &codewhale_protocol::ThreadGoal) -> Self {
+        let (status, pause_reason) = thread_goal_status_projection(goal.status.clone());
         Self {
             objective: Some(goal.objective.clone()),
-            status: thread_goal_status_as_goal_status(goal.status.clone())
-                .as_str()
-                .to_string(),
+            status: status.as_str().to_string(),
             token_budget: goal
                 .token_budget
                 .and_then(|value| u32::try_from(value.max(0)).ok()),
@@ -290,28 +336,35 @@ impl GoalSnapshot {
             elapsed_seconds: None,
             evidence: None,
             blocker: None,
+            pause_reason,
             completion_verification: None,
         }
     }
 }
 
 #[must_use]
-pub fn thread_goal_status_as_goal_status(
+pub fn thread_goal_status_projection(
     status: codewhale_protocol::ThreadGoalStatus,
-) -> GoalStatus {
+) -> (GoalStatus, Option<GoalPauseReason>) {
     match status {
-        codewhale_protocol::ThreadGoalStatus::Active => GoalStatus::Active,
-        codewhale_protocol::ThreadGoalStatus::Paused => GoalStatus::Paused,
-        codewhale_protocol::ThreadGoalStatus::Complete => GoalStatus::Complete,
-        codewhale_protocol::ThreadGoalStatus::Blocked
-        | codewhale_protocol::ThreadGoalStatus::UsageLimited
-        | codewhale_protocol::ThreadGoalStatus::BudgetLimited => GoalStatus::Blocked,
+        codewhale_protocol::ThreadGoalStatus::Active => (GoalStatus::Active, None),
+        codewhale_protocol::ThreadGoalStatus::Paused => {
+            (GoalStatus::Paused, Some(GoalPauseReason::User))
+        }
+        codewhale_protocol::ThreadGoalStatus::Complete => (GoalStatus::Complete, None),
+        codewhale_protocol::ThreadGoalStatus::Blocked => (GoalStatus::Blocked, None),
+        codewhale_protocol::ThreadGoalStatus::UsageLimited => {
+            (GoalStatus::Paused, Some(GoalPauseReason::UsageLimit))
+        }
+        codewhale_protocol::ThreadGoalStatus::BudgetLimited => {
+            (GoalStatus::Paused, Some(GoalPauseReason::BudgetLimit))
+        }
     }
 }
 
 /// Render the continuation prompt injected when a goal is still active after a
-/// turn. There is no run-level cap, so this shows progress (turn count, tokens)
-/// rather than a "N/max" meter — the loop runs until done, blocked, or paused.
+/// turn. This shows progress and lets the circuit breaker remain an
+/// implementation detail rather than encouraging the model to spend the cap.
 #[must_use]
 pub fn render_continuation_prompt(snapshot: &GoalSnapshot, continuation_index: u32) -> String {
     let goal_json = serde_json::to_string_pretty(snapshot).unwrap_or_else(|_| "{}".to_string());
@@ -963,6 +1016,7 @@ mod tests {
 
         assert_eq!(snapshot.status, "paused");
         assert_eq!(snapshot.token_budget, Some(42));
+        assert_eq!(snapshot.pause_reason, Some(GoalPauseReason::User));
         assert!(!snapshot.is_active());
     }
 
@@ -1051,6 +1105,24 @@ mod tests {
     }
 
     #[test]
+    fn protocol_limit_statuses_keep_distinct_pause_reasons() {
+        for (status, reason) in [
+            (
+                codewhale_protocol::ThreadGoalStatus::UsageLimited,
+                GoalPauseReason::UsageLimit,
+            ),
+            (
+                codewhale_protocol::ThreadGoalStatus::BudgetLimited,
+                GoalPauseReason::BudgetLimit,
+            ),
+        ] {
+            let (projected, projected_reason) = thread_goal_status_projection(status);
+            assert_eq!(projected, GoalStatus::Paused);
+            assert_eq!(projected_reason, Some(reason));
+        }
+    }
+
+    #[test]
     fn continuation_prompt_includes_bound_and_goal_state() {
         let snapshot = GoalSnapshot {
             objective: Some("finish issue 2199".to_string()),
@@ -1062,6 +1134,7 @@ mod tests {
             elapsed_seconds: Some(5),
             evidence: None,
             blocker: None,
+            pause_reason: None,
             completion_verification: None,
         };
 

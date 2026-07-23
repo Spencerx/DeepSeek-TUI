@@ -1827,7 +1827,10 @@ fn thread_goal_status_from_str(value: &str) -> ThreadGoalStatus {
         "usage_limited" => ThreadGoalStatus::UsageLimited,
         "budget_limited" => ThreadGoalStatus::BudgetLimited,
         "complete" => ThreadGoalStatus::Complete,
-        _ => ThreadGoalStatus::Active,
+        // Fail closed: an unknown or corrupted persisted value must never
+        // resurrect a self-driving goal. The user can inspect and explicitly
+        // resume a paused goal after repairing or replacing the record.
+        _ => ThreadGoalStatus::Paused,
     }
 }
 
@@ -1937,6 +1940,14 @@ mod tests {
             created_at: 100,
             updated_at: 101,
         }
+    }
+
+    #[test]
+    fn unknown_persisted_goal_status_fails_closed() {
+        assert_eq!(
+            thread_goal_status_from_str("future_or_corrupt_status"),
+            ThreadGoalStatus::Paused
+        );
     }
 
     #[test]
