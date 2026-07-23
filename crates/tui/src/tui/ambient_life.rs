@@ -261,7 +261,8 @@ fn build_frame_marks(
         if let Some(flee_ms) = cursor.flee_elapsed_ms {
             let flee = fish_flee_offset(flee_ms);
             let ptr = cursor.column.saturating_sub(area.x);
-            if lead_x.abs_diff(ptr) < 16 {
+            let ptr_y = cursor.row.saturating_sub(area.y);
+            if lead_x.abs_diff(ptr) < 16 && base_y.abs_diff(ptr_y) < 6 {
                 if lead_x >= ptr {
                     lead_x = lead_x.saturating_add(flee);
                 } else {
