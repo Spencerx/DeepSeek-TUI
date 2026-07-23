@@ -152,7 +152,10 @@ pub(crate) fn project_agent_details(app: &App, agent_id: &str) -> Option<AgentDe
     let steps = agent.map_or(0, |agent| agent.steps_taken);
     let mut state = vec![activity_status_label(status).to_string()];
     if let Some(agent) = agent {
-        state.push(format!("elapsed {}", format_duration_ms(agent.duration_ms)));
+        state.push(format!(
+            "elapsed {}",
+            crate::elapsed::format_elapsed_ms(agent.duration_ms)
+        ));
     }
     state.push(format!(
         "{steps} {}",
@@ -480,18 +483,6 @@ fn safe_workspace(app: &App, workspace: &Path) -> Option<String> {
         .and_then(|name| safe_child_value(app, name))
 }
 
-fn format_duration_ms(duration_ms: u64) -> String {
-    if duration_ms < 1_000 {
-        format!("{duration_ms}ms")
-    } else if duration_ms < 60_000 {
-        format!("{:.1}s", duration_ms as f64 / 1_000.0)
-    } else {
-        let minutes = duration_ms / 60_000;
-        let seconds = (duration_ms % 60_000) / 1_000;
-        format!("{minutes}m {seconds}s")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,7 +601,7 @@ mod tests {
             AgentWorkerStatus::RunningTool,
             None,
         );
-        assert!(running.contains("State: running tool · elapsed 2.5s · 2 steps"));
+        assert!(running.contains("State: running tool · elapsed 2s · 2 steps"));
         assert!(running.contains("Current: running tool · read_file · step 2"));
         assert!(!running.contains("Provider:"));
 

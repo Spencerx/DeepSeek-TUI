@@ -4826,13 +4826,10 @@ impl SubAgentManager {
                 // #3020: Include elapsed time so the parent can distinguish a
                 // live worker from a stale/failed earlier spawn (#2656).
                 let elapsed = existing.started_at.elapsed();
-                let since = if elapsed.as_secs() < 120 {
-                    format!("{}s ago", elapsed.as_secs())
-                } else {
-                    let mins = elapsed.as_secs() / 60;
-                    let secs = elapsed.as_secs() % 60;
-                    format!("{mins}m{secs}s ago")
-                };
+                let since = format!(
+                    "{} ago",
+                    crate::elapsed::format_elapsed_secs(elapsed.as_secs())
+                );
                 return Err(anyhow!(
                     "Sub-agent session name '{name}' is already in use by agent_id '{}' \
                      (status: {}, started {since}). \

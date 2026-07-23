@@ -805,7 +805,7 @@ pub(super) fn format_task_list(tasks: &[TaskSummary]) -> String {
     for task in tasks {
         let duration = task
             .duration_ms
-            .map(|ms| format!("{:.2}s", ms as f64 / 1000.0))
+            .map(crate::elapsed::format_elapsed_ms)
             .unwrap_or_else(|| "-".to_string());
         if show_verdict {
             lines.push(format!(
@@ -871,7 +871,10 @@ fn format_task_detail(task: &TaskRecord) -> String {
         lines.push(format!("Ended: {ended_at}"));
     }
     if let Some(duration) = task.duration_ms {
-        lines.push(format!("Duration: {:.2}s", duration as f64 / 1000.0));
+        lines.push(format!(
+            "Duration: {}",
+            crate::elapsed::format_elapsed_ms(duration)
+        ));
     }
     lines.push(String::new());
     lines.push("Prompt:".to_string());
@@ -1039,7 +1042,7 @@ mod tests {
         )));
         assert!(output.contains(&format!(
             "{:<21}  {:<9}  {:>8}  {}",
-            "task_abcdef12", "completed", "1.23s", "Fix task list output"
+            "task_abcdef12", "completed", "1s", "Fix task list output"
         )));
     }
 

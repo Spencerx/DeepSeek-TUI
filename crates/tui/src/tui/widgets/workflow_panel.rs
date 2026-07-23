@@ -730,12 +730,12 @@ impl WorkflowPanel {
         // timestamps) which would otherwise render multi-year elapsed times.
         if self.started_at_ms == 0 {
             if let Some(completed) = self.completed_at_ms {
-                return format_elapsed(completed);
+                return crate::elapsed::format_elapsed_ms(completed);
             }
             return "0s".to_string();
         }
         let end = self.completed_at_ms.unwrap_or_else(now_ms);
-        format_elapsed(end.saturating_sub(self.started_at_ms))
+        crate::elapsed::format_elapsed_ms(end.saturating_sub(self.started_at_ms))
     }
 
     /// Compact summary line content (without card chrome). Callers in
@@ -843,7 +843,7 @@ impl WorkflowPanel {
                         mark = role_mark(row.profile.as_deref()),
                         label = short_label(&row.label, 14),
                         track = lane_track(row, max_elapsed, 16, now_ms()),
-                        elapsed = format_elapsed(row_elapsed_ms(row, now_ms())),
+                        elapsed = crate::elapsed::format_elapsed_ms(row_elapsed_ms(row, now_ms())),
                         status = row.status.display_label(self.locale),
                     ),
                     content_width,
@@ -1315,7 +1315,7 @@ impl WorkflowPanel {
         };
         let elapsed = {
             let end = self.completed_at_ms.unwrap_or_else(now_ms);
-            format_elapsed(end.saturating_sub(self.started_at_ms))
+            crate::elapsed::format_elapsed_ms(end.saturating_sub(self.started_at_ms))
         };
         let focus = if self.keyboard_focus { "*" } else { "" };
         let raw = format!(
@@ -1433,7 +1433,7 @@ impl WorkflowPanel {
 
     fn render_row_line(&self, row: &WorkflowPanelRow, width: usize, now_ms: u64) -> Line<'static> {
         let elapsed_ms = row_elapsed_ms(row, now_ms);
-        let elapsed = format_elapsed(elapsed_ms);
+        let elapsed = crate::elapsed::format_elapsed_ms(elapsed_ms);
         let role = row.profile.as_deref().unwrap_or("-");
         let model = match (row.model.as_deref(), row.strength.as_deref()) {
             (Some(m), Some(s)) => format!("{m}/{s}"),
@@ -1623,20 +1623,6 @@ fn lane_track(row: &WorkflowPanelRow, max_elapsed_ms: u64, width: usize, now_ms:
         end,
         "-".repeat(body_width.saturating_sub(active))
     )
-}
-
-/// Format an elapsed duration for panel headers and history cards. Shared with
-/// direct sub-agent cards so both surfaces use the same vocabulary.
-#[must_use]
-pub fn format_elapsed(ms: u64) -> String {
-    let secs = ms / 1000;
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
-    }
 }
 
 fn now_ms() -> u64 {

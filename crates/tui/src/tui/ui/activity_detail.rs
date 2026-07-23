@@ -260,7 +260,9 @@ fn reasoning_timeline_text(app: &App, selected_cell_index: usize) -> Option<Stri
         };
         if let Some(duration_secs) = duration_secs {
             status.push_str(" · ");
-            status.push_str(&format!("{duration_secs:.1}s"));
+            status.push_str(&crate::elapsed::format_elapsed_ms(
+                (duration_secs * 1000.0) as u64,
+            ));
         }
         sections.push(format!("Thinking chunk {position} of {total}{marker}"));
         sections.push(format!("Status: {status}"));
@@ -322,7 +324,9 @@ fn activity_status_line(cell: &HistoryCell) -> Option<String> {
             };
             if let Some(duration_secs) = duration_secs {
                 line.push_str(" · ");
-                line.push_str(&format!("{duration_secs:.1}s"));
+                line.push_str(&crate::elapsed::format_elapsed_ms(
+                    (duration_secs * 1000.0) as u64,
+                ));
             }
             Some(line)
         }
@@ -331,7 +335,7 @@ fn activity_status_line(cell: &HistoryCell) -> Option<String> {
             let mut line = format!("Status: {}", activity_status_label(status));
             if let Some(duration_ms) = tool_duration_for_activity(tool) {
                 line.push_str(" · ");
-                line.push_str(&format_activity_duration_ms(duration_ms));
+                line.push_str(&crate::elapsed::format_elapsed_ms(duration_ms));
             }
             Some(line)
         }
@@ -400,14 +404,6 @@ fn activity_status_label(status: ToolStatus) -> &'static str {
         ToolStatus::Success => "done",
         ToolStatus::Hydrated => "tool loaded - retry required",
         ToolStatus::Failed => "failed",
-    }
-}
-
-fn format_activity_duration_ms(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else {
-        format!("{:.1}s", ms as f64 / 1000.0)
     }
 }
 
@@ -1271,7 +1267,8 @@ fn turn_timeline_lines(app: &App, start: usize, end: usize) -> Vec<String> {
             } => {
                 let summary = one_line_summary(content, 88);
                 let status = streaming.then_some("running").unwrap_or("done");
-                let duration = duration_secs.map(|secs| format!("{secs:.1}s"));
+                let duration = duration_secs
+                    .map(|secs| crate::elapsed::format_elapsed_ms((secs * 1000.0) as u64));
                 let actions = timeline_cell_actions(app, idx, cell);
                 rows.push(timeline_row(
                     "reasoning",
@@ -1283,7 +1280,8 @@ fn turn_timeline_lines(app: &App, start: usize, end: usize) -> Vec<String> {
             }
             HistoryCell::Tool(tool) => {
                 let (kind, summary) = timeline_tool_summary(app, idx, tool);
-                let duration = tool_duration_for_activity(tool).map(format_activity_duration_ms);
+                let duration =
+                    tool_duration_for_activity(tool).map(crate::elapsed::format_elapsed_ms);
                 let status = tool_status_for_activity(tool).map(activity_status_label);
                 let actions = timeline_cell_actions(app, idx, cell);
                 rows.push(timeline_row(

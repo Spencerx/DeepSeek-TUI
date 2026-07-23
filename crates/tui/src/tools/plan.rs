@@ -120,16 +120,7 @@ impl PlanStep {
     #[must_use]
     pub fn elapsed_str(&self) -> String {
         match self.elapsed() {
-            Some(d) => {
-                let secs = d.as_secs();
-                if secs < 60 {
-                    format!("{secs}s")
-                } else if secs < 3600 {
-                    format!("{}m {}s", secs / 60, secs % 60)
-                } else {
-                    format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-                }
-            }
+            Some(d) => crate::elapsed::format_elapsed_secs(d.as_secs()),
             None => String::new(),
         }
     }

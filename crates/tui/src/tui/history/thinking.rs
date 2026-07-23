@@ -158,7 +158,10 @@ pub(super) fn render_thinking(
     ));
     if let Some(dur) = duration_secs {
         header_spans.push(Span::styled(" · ", Style::default().fg(palette::TEXT_DIM)));
-        header_spans.push(Span::styled(format!("{dur:.1}s"), thinking_meta_style()));
+        header_spans.push(Span::styled(
+            crate::elapsed::format_elapsed_ms((dur * 1000.0) as u64),
+            thinking_meta_style(),
+        ));
     }
     lines.push(Line::from(header_spans));
 
@@ -288,7 +291,10 @@ pub(super) fn render_hidden_thinking_activity(
     ];
     if let Some(dur) = duration_secs {
         header_spans.push(Span::styled(" · ", Style::default().fg(palette::TEXT_DIM)));
-        header_spans.push(Span::styled(format!("{dur:.1}s"), thinking_meta_style()));
+        header_spans.push(Span::styled(
+            crate::elapsed::format_elapsed_ms((dur * 1000.0) as u64),
+            thinking_meta_style(),
+        ));
     }
     if !low_motion {
         header_spans.push(Span::styled(

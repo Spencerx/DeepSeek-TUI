@@ -215,14 +215,21 @@ fn provider_wait_reason(app: &App) -> String {
 
     let near_timeout = budget > 0 && idle >= budget.saturating_mul(3) / 4; // ≥ 75%
     if near_timeout {
-        format!("waiting for model · {idle}s/{budget}s idle timeout")
+        format!(
+            "waiting for model · {}/{} idle timeout",
+            crate::elapsed::format_elapsed_secs(idle),
+            crate::elapsed::format_elapsed_secs(budget)
+        )
     } else if idle < PROVIDER_WAIT_IDLE_SHOW_SECS {
         // Normal wait — no countdown noise.
         "waiting for model".to_string()
     } else {
-        // Significant idle — surface the elapsed seconds so the user can judge
+        // Significant idle — surface the elapsed time so the user can judge
         // whether the stream is making progress.
-        format!("waiting for model · {idle}s")
+        format!(
+            "waiting for model · {}",
+            crate::elapsed::format_elapsed_secs(idle)
+        )
     }
 }
 
@@ -435,9 +442,9 @@ mod tests {
         app.turn_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
         let reason = super::provider_wait_reason(&app);
         assert!(reason.contains("waiting for model"));
-        assert!(reason.contains("60s"));
+        assert!(reason.contains("1m 00s"));
         // Should NOT show the full timeout budget yet (<75% of 300s = 225s)
-        assert!(!reason.contains("/300s"));
+        assert!(!reason.contains("/5m 00s"));
     }
 
     #[test]
@@ -448,8 +455,8 @@ mod tests {
         app.turn_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(240));
         let reason = super::provider_wait_reason(&app);
         assert!(reason.contains("waiting for model"));
-        assert!(reason.contains("/300s idle timeout"));
-        assert!(reason.contains("240s"));
+        assert!(reason.contains("/5m 00s idle timeout"));
+        assert!(reason.contains("4m 00s"));
     }
 
     #[test]
@@ -596,7 +603,7 @@ pub(crate) fn active_tool_status_label(app: &App, include_counts: bool) -> Optio
     let elapsed = snapshot
         .started_at
         .or(app.turn_started_at)
-        .map(|started| format!("{}s", started.elapsed().as_secs()));
+        .map(|started| crate::elapsed::format_elapsed_secs(started.elapsed().as_secs()));
 
     let mut parts = vec![primary];
     if include_counts {

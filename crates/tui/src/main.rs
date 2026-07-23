@@ -45,6 +45,7 @@ mod core;
 mod cost_status;
 mod deepseek_theme;
 mod dependencies;
+mod elapsed;
 mod error_taxonomy;
 mod eval;
 mod execpolicy;

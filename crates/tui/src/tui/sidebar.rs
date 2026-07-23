@@ -973,12 +973,11 @@ fn work_panel_hover_texts(
 /// is `Some`), the elapsed is frozen at `finished - started` so a completed or
 /// escaped goal stops ticking in the sidebar; otherwise it grows live.
 fn goal_elapsed_for_summary(started: Instant, finished: Option<Instant>) -> String {
-    use crate::tui::notifications::humanize_duration;
     let elapsed = match finished {
         Some(end) => end.saturating_duration_since(started),
         None => started.elapsed(),
     };
-    humanize_duration(elapsed)
+    crate::elapsed::format_elapsed_secs(elapsed.as_secs())
 }
 
 fn push_work_goal_lines(
@@ -1514,7 +1513,7 @@ fn task_panel_rows(
             };
             let duration = task
                 .duration_ms
-                .map(format_duration_ms)
+                .map(crate::elapsed::format_elapsed_ms)
                 .unwrap_or_else(|| "-".to_string());
             let (label, detail) = background_task_labels(task, &duration);
             let label = background_task_spinner_prefix(
@@ -1651,7 +1650,7 @@ fn task_panel_hover_texts(app: &App, row_sets: &TaskPanelRowSets, max_rows: usiz
         for task in background_rows.iter().take(max_items) {
             let duration = task
                 .duration_ms
-                .map(format_duration_ms)
+                .map(crate::elapsed::format_elapsed_ms)
                 .unwrap_or_else(|| "-".to_string());
             let (label, detail) = background_task_labels(task, &duration);
             let label = background_task_spinner_prefix(
@@ -1727,7 +1726,11 @@ fn push_tool_row_hover_texts(texts: &mut Vec<String>, rows: &[SidebarToolRow], m
         }
         let (marker, _) = tool_status_marker(row.status, &palette::UI_THEME);
         let label = if let Some(duration_ms) = row.duration_ms {
-            format!("{marker} {} {}", row.name, format_duration_ms(duration_ms))
+            format!(
+                "{marker} {} {}",
+                row.name,
+                crate::elapsed::format_elapsed_ms(duration_ms)
+            )
         } else {
             format!("{marker} {}", row.name)
         };
@@ -1802,7 +1805,7 @@ fn stale_no_output_label(task: &TaskPanelEntry) -> Option<String> {
         return None;
     }
     task.elapsed_since_output_ms
-        .map(format_duration_ms)
+        .map(crate::elapsed::format_elapsed_ms)
         .map(|duration| format!("stale, no output {duration}"))
         .or_else(|| Some("stale, no output".to_string()))
 }
@@ -1909,7 +1912,11 @@ fn push_tool_rows(
         }
         let (marker, color) = tool_status_marker(row.status, theme);
         let label = if let Some(duration_ms) = row.duration_ms {
-            format!("{marker} {} {}", row.name, format_duration_ms(duration_ms))
+            format!(
+                "{marker} {} {}",
+                row.name,
+                crate::elapsed::format_elapsed_ms(duration_ms)
+            )
         } else {
             format!("{marker} {}", row.name)
         };
@@ -2500,14 +2507,6 @@ fn tool_status_marker(
     }
 }
 
-fn format_duration_ms(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    }
-}
-
 fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -3052,7 +3051,7 @@ fn subagent_panel_rows(
             detail_parts.push(format!("model {model}"));
         }
         if let Some(duration) = row.duration_ms {
-            detail_parts.push(format_duration_ms(duration));
+            detail_parts.push(crate::elapsed::format_elapsed_ms(duration));
         }
         if row.steps_taken > 0 {
             detail_parts.push(format!("{} step(s)", row.steps_taken));
@@ -3230,7 +3229,7 @@ fn subagent_panel_hover_texts(
             detail_parts.push(format!("branch {branch}"));
         }
         if let Some(duration) = row.duration_ms {
-            detail_parts.push(format_duration_ms(duration));
+            detail_parts.push(crate::elapsed::format_elapsed_ms(duration));
         }
         texts.push(format!("  {}", detail_parts.join(" · ")));
     }
@@ -3266,7 +3265,11 @@ fn agent_row_hover_text(row: &SidebarAgentRow) -> String {
     }
     let mut status_line = format!("status: {}", row.status);
     if let Some(duration) = row.duration_ms {
-        let _ = write!(status_line, " · elapsed {}", format_duration_ms(duration));
+        let _ = write!(
+            status_line,
+            " · elapsed {}",
+            crate::elapsed::format_elapsed_ms(duration)
+        );
     }
     if row.steps_taken > 0 {
         let _ = write!(status_line, " · {} step(s)", row.steps_taken);
@@ -6261,8 +6264,7 @@ mod tests {
         let text = lines_to_text(&task_panel_lines(&app, 80, 8));
 
         assert!(
-            text.iter()
-                .any(|line| line.contains("[✓] cargo check 1.2s")),
+            text.iter().any(|line| line.contains("[✓] cargo check 1s")),
             "status marker and duration should stay in the row label: {text:?}"
         );
         assert!(
@@ -6866,7 +6868,7 @@ mod tests {
         // unique to the detail line, so key off it.
         let detail = text
             .iter()
-            .find(|line| line.contains("4.0s"))
+            .find(|line| line.contains("4s"))
             .expect("expanded detail should surface elapsed time: {text:?}");
         assert!(
             detail.contains("running"),

@@ -805,10 +805,9 @@ impl ExecCell {
             if let Some(duration_ms) = self.duration_ms
                 && duration_ms >= 1000
             {
-                let seconds = f64::from(u32::try_from(duration_ms).unwrap_or(u32::MAX)) / 1000.0;
                 lines.extend(render_compact_kv(
                     "time",
-                    &format!("{seconds:.2}s"),
+                    &crate::elapsed::format_elapsed_ms(duration_ms),
                     Style::default().fg(palette::TEXT_DIM),
                     width,
                 ));
@@ -875,12 +874,11 @@ impl ExecCell {
 
         if let Some(duration_ms) = self.duration_ms {
             // #3031: Suppress sub-second timing in compact mode.
-            // Transcript mode always shows exact timing.
+            // Transcript mode always shows timing.
             if mode == RenderMode::Transcript || duration_ms >= 1000 {
-                let seconds = f64::from(u32::try_from(duration_ms).unwrap_or(u32::MAX)) / 1000.0;
                 lines.extend(render_compact_kv(
                     "time",
-                    &format!("{seconds:.2}s"),
+                    &crate::elapsed::format_elapsed_ms(duration_ms),
                     Style::default().fg(palette::TEXT_DIM),
                     width,
                 ));

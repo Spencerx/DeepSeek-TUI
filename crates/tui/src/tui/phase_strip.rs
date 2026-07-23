@@ -90,8 +90,8 @@ fn truncate_to_width(text: &str, width: usize) -> String {
     result
 }
 
-/// Compact working detail for the phase band: `×N` for tools or `12s` while
-/// the model is thinking.
+/// Compact working detail for the phase band: `×N` for tools or `1m 15s`
+/// while the model is thinking.
 /// Kept quieter than the classic footer's verbose tool-status line so the
 /// transcript owns the ledger and the strip only names the live pulse.
 fn working_detail(app: &App, activity: LiveActivity) -> Option<String> {
@@ -100,7 +100,7 @@ fn working_detail(app: &App, activity: LiveActivity) -> Option<String> {
         .turn_started_at
         .map(|started| started.elapsed().as_secs());
     match (running, secs) {
-        (0, Some(secs)) if secs > 0 => Some(format!("{secs}s")),
+        (0, Some(secs)) if secs > 0 => Some(crate::elapsed::format_elapsed_secs(secs)),
         (n, Some(_)) if n > 0 => Some(format!("×{n}")),
         (n, None) if n > 0 => Some(format!("×{n}")),
         _ => None,

@@ -8447,8 +8447,8 @@ fn stall_reason_provider_wait_includes_route_and_idle_budget() {
     let reason = crate::tui::footer_ui::stall_reason(&app).expect("stalled turn has a reason");
     assert!(reason.contains("waiting for model"), "{reason}");
     // idle >= 60s, so the counter appears, but < 75% budget (225s) so no budget detail.
-    assert!(reason.contains("65s"), "{reason}");
-    assert!(!reason.contains("/300s"), "{reason}");
+    assert!(reason.contains("1m 05s"), "{reason}");
+    assert!(!reason.contains("/5m 00s"), "{reason}");
 }
 
 #[test]
@@ -14665,7 +14665,7 @@ fn turn_inspector_renders_overview_sections_for_active_turn() {
     // Intent + tool timeline + files + result are the must-have populated ones.
     assert!(body.contains("Fix the flaky login test"), "{body}");
     assert!(body.contains("test/verifier: cargo test login"), "{body}");
-    assert!(body.contains("2.4s"), "duration missing: {body}");
+    assert!(body.contains("2s"), "duration missing: {body}");
     assert!(body.contains("src/login.rs"), "{body}");
     assert!(
         body.contains("cargo test login — done"),
@@ -14798,7 +14798,7 @@ fn turn_inspector_timeline_numbers_semantic_entries_and_checkpoint_actions() {
     );
     assert!(
         body.contains(&format!(
-            "4. test/verifier: cargo test timeline — done · 1.2s · actions: {details_chord} raw detail"
+            "4. test/verifier: cargo test timeline — done · 1s · actions: {details_chord} raw detail"
         )),
         "{body}"
     );
@@ -17038,7 +17038,7 @@ fn completed_turn_notification_leads_with_user_locale() {
         Duration::from_secs(65),
         None,
     );
-    assert_eq!(msg, "ターン完了 (1m 5s)\n完了しました。");
+    assert_eq!(msg, "ターン完了 (1m 05s)\n完了しました。");
 }
 
 #[test]
@@ -17070,7 +17070,7 @@ fn subagent_completion_notification_can_include_elapsed_summary() {
         Duration::from_secs(65),
     );
 
-    assert_eq!(msg, "Sub-agent complete (1m 5s)\nagent_live");
+    assert_eq!(msg, "Sub-agent complete (1m 05s)\nagent_live");
 }
 
 #[test]
