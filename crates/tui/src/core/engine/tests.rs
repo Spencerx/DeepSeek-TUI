@@ -12,7 +12,6 @@ use crate::prompts::{
     system_prompt_for_mode_with_context_skills_and_session,
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
-use crate::tools::plan::{PlanItemArg, PlanSnapshot, StepStatus};
 use crate::tools::spec::ToolCapability;
 use crate::tools::todo::{TodoItem, TodoListSnapshot, TodoStatus};
 use serde_json::json;
@@ -2888,45 +2887,6 @@ fn tool_catalog_filter_is_inert_without_gates() {
 }
 
 #[test]
-fn structured_state_block_includes_rich_plan_artifact() {
-    let state = StructuredState {
-        mode_label: "Plan".to_string(),
-        workspace: PathBuf::from("/workspace/codewhale"),
-        cwd: None,
-        working_set_summary: None,
-        todo_snapshot: None,
-        plan_snapshot: Some(PlanSnapshot {
-            objective: Some("Make Plan mode reviewable".to_string()),
-            context_summary: Some("Grounded in issue #2691".to_string()),
-            sources_used: vec!["gh issue view 2691".to_string()],
-            critical_files: vec!["crates/tui/src/tools/plan.rs".to_string()],
-            constraints: vec!["Preserve legacy payloads".to_string()],
-            recommended_approach: Some("Enrich update_plan".to_string()),
-            verification_plan: Some("Run focused tests".to_string()),
-            risks_and_unknowns: Some("Replay may drift".to_string()),
-            handoff_packet: Some("Next agent should inspect replay".to_string()),
-            items: vec![PlanItemArg {
-                step: "Render rich artifact".to_string(),
-                status: StepStatus::InProgress,
-            }],
-            ..PlanSnapshot::default()
-        }),
-        subagent_snapshots: Vec::new(),
-    };
-
-    let block = state.to_system_block().expect("fork state block");
-
-    assert!(block.contains("Objective: Make Plan mode reviewable"));
-    assert!(block.contains("Context: Grounded in issue #2691"));
-    assert!(block.contains("Source: gh issue view 2691"));
-    assert!(block.contains("Critical file: crates/tui/src/tools/plan.rs"));
-    assert!(block.contains("Constraint: Preserve legacy payloads"));
-    assert!(block.contains("Verification plan: Run focused tests"));
-    assert!(block.contains("Handoff packet: Next agent should inspect replay"));
-    assert!(block.contains("- [~] Render rich artifact"));
-}
-
-#[test]
 fn structured_state_block_uses_checklist_as_work_surface() {
     let state = StructuredState {
         mode_label: "Agent".to_string(),
@@ -2949,21 +2909,15 @@ fn structured_state_block_uses_checklist_as_work_surface() {
             completion_pct: 0,
             in_progress_id: Some(1),
         }),
-        plan_snapshot: Some(PlanSnapshot {
-            objective: Some("Keep strategy separate".to_string()),
-            ..PlanSnapshot::default()
-        }),
         subagent_snapshots: Vec::new(),
     };
 
     let block = state.to_system_block().expect("fork state block");
 
     assert!(block.contains("### Work"));
-    assert!(block.contains("Checklist (0% complete)"));
-    assert!(block.contains("- [~] Wire Fleet progress projection"));
-    assert!(block.contains("Strategy metadata"));
-    assert!(block.contains("Objective: Keep strategy separate"));
-    assert!(!block.contains("Todo list"));
+    assert!(block.contains("To-do (0% settled)"));
+    assert!(block.contains("- [~] #1 Wire Fleet progress projection"));
+    assert!(!block.contains("Strategy"));
 }
 
 #[test]
@@ -3463,7 +3417,6 @@ async fn coalesced_raw_read_error_touches_working_set_once() {
                 Some(&registry),
                 tools,
                 AppMode::Agent,
-                false,
                 Vec::new(),
             )
             .await;
@@ -4639,94 +4592,6 @@ fn globally_exclusive_agent_start_splits_neighboring_readonly_tools() {
 }
 
 #[test]
-fn successful_update_plan_ends_plan_mode_turn_immediately() {
-    assert!(should_stop_after_plan_tool(
-        AppMode::Plan,
-        "update_plan",
-        &Ok(ToolResult::success("planned"))
-    ));
-    assert!(!should_stop_after_plan_tool(
-        AppMode::Agent,
-        "update_plan",
-        &Ok(ToolResult::success("planned"))
-    ));
-    assert!(!should_stop_after_plan_tool(
-        AppMode::Plan,
-        "request_user_input",
-        &Ok(ToolResult::success("input"))
-    ));
-    assert!(!should_stop_after_plan_tool(
-        AppMode::Plan,
-        "update_plan",
-        &Err(ToolError::execution_failed("failed".to_string()))
-    ));
-}
-
-#[test]
-fn quick_plan_requests_force_update_plan_on_first_step() {
-    assert!(should_force_update_plan_first(
-        AppMode::Plan,
-        "Give me a quick 3-step plan to verify the UI changes."
-    ));
-    assert!(should_force_update_plan_first(
-        AppMode::Plan,
-        "Make a high-level plan for the footer work."
-    ));
-    assert!(!should_force_update_plan_first(
-        AppMode::Plan,
-        "Can you make a plan to get ver 0.8.61 fully built and benchmark it with our api server?"
-    ));
-    assert!(!should_force_update_plan_first(
-        AppMode::Plan,
-        "Make a high-level plan for benchmarking https://github.com/sierra-research/tau2-bench."
-    ));
-    assert!(!should_force_update_plan_first(
-        AppMode::Plan,
-        "Inspect the repo and then give me a quick plan."
-    ));
-    assert!(!should_force_update_plan_first(
-        AppMode::Agent,
-        "Give me a quick 3-step plan."
-    ));
-}
-
-#[test]
-fn quick_plan_turn_can_narrow_first_step_tools_to_update_plan() {
-    let catalog = vec![
-        Tool {
-            tool_type: Some("function".to_string()),
-            name: "read_file".to_string(),
-            description: "Read a file".to_string(),
-            input_schema: json!({"type": "object"}),
-            allowed_callers: Some(vec!["direct".to_string()]),
-            defer_loading: Some(false),
-            input_examples: None,
-            strict: None,
-            cache_control: None,
-        },
-        Tool {
-            tool_type: Some("function".to_string()),
-            name: "update_plan".to_string(),
-            description: "Publish a plan".to_string(),
-            input_schema: json!({"type": "object"}),
-            allowed_callers: Some(vec!["direct".to_string()]),
-            defer_loading: Some(false),
-            input_examples: None,
-            strict: None,
-            cache_control: None,
-        },
-    ];
-    let active = initial_active_tools(&catalog);
-
-    let forced = active_tools_for_step(&catalog, &active, true);
-    assert_eq!(forced.len(), 1);
-    assert_eq!(forced[0].name, "update_plan");
-
-    let default = active_tools_for_step(&catalog, &active, false);
-    assert_eq!(default.len(), 2);
-}
-
-#[test]
 fn tool_error_messages_include_actionable_hints() {
     let path_error = ToolError::path_escape(PathBuf::from("../escape.txt"));
     let formatted = format_tool_error(&path_error, "read_file");
@@ -4946,7 +4811,7 @@ fn core_native_tools_stay_loaded_in_yolo_mode() {
 
 #[test]
 fn default_active_contract_keeps_remember_and_synthetic_tool_search_eager() {
-    const EXPECTED_NATIVE: [&str; 9] = [
+    const EXPECTED_NATIVE: [&str; 8] = [
         "Bash",
         "File",
         "Git",
@@ -4954,7 +4819,6 @@ fn default_active_contract_keeps_remember_and_synthetic_tool_search_eager() {
         "agent",
         "remember",
         "tasks",
-        "update_plan",
         "work_update",
     ];
     assert_eq!(
@@ -5109,7 +4973,7 @@ fn capability_compact_surface_defers_nonessential_core_tools() {
 
     assert_eq!(defer_loading("File"), Some(false));
     assert_eq!(defer_loading("Git"), Some(false));
-    assert_eq!(defer_loading("update_plan"), Some(false));
+    assert_eq!(defer_loading("update_plan"), Some(true));
     assert_eq!(defer_loading(TOOL_SEARCH_NAME), Some(false));
     assert_eq!(defer_loading("list_mcp_resources"), Some(false));
     assert_eq!(defer_loading("agent"), Some(true));
@@ -5425,7 +5289,7 @@ fn print_agent_tool_catalog_metrics() {
     );
     ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
     let active = initial_active_tools(&catalog);
-    let active_catalog = active_tools_for_step(&catalog, &active, false);
+    let active_catalog = active_tools_for_step(&catalog, &active);
     let active_json = serde_json::to_vec(&active_catalog).expect("serialize active");
     let reduction_percent = if baseline_json.is_empty() {
         0.0
@@ -5645,7 +5509,7 @@ fn request_user_input_stays_deferred_but_can_be_dynamically_activated() {
     assert!(!active.contains(REQUEST_USER_INPUT_NAME));
     active.insert(REQUEST_USER_INPUT_NAME.to_string());
 
-    let active_tools = active_tools_for_step(&catalog, &active, false);
+    let active_tools = active_tools_for_step(&catalog, &active);
     assert!(
         active_tools
             .iter()
@@ -5753,7 +5617,7 @@ fn active_tool_list_pushes_deferred_activations_to_the_tail() {
         .map(String::from)
         .collect();
 
-    let listed = active_tools_for_step(&catalog, &active, false);
+    let listed = active_tools_for_step(&catalog, &active);
     let names: Vec<&str> = listed.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         names,
@@ -5903,8 +5767,8 @@ fn model_catalog_exposes_work_update_as_sole_progress_surface() {
         "work_update should load with the default active native set"
     );
     assert!(
-        catalog_names.contains("update_plan"),
-        "update_plan remains Strategy metadata, not a second checklist"
+        !catalog_names.contains("update_plan"),
+        "retired Strategy/Plan must stay replay-only"
     );
     for hidden in [
         "checklist_write",
@@ -7719,7 +7583,7 @@ fn plan_mode_toggle_preserves_catalog_byte_stability() {
         .collect();
     active.insert("deferred_search".to_string());
 
-    let listed = active_tools_for_step(&catalog_with_deferred, &active, false);
+    let listed = active_tools_for_step(&catalog_with_deferred, &active);
     let listed_names: Vec<&str> = listed.iter().map(|t| t.name.as_str()).collect();
 
     // The head (non-deferred tools) must still be in their original order.
@@ -9976,7 +9840,8 @@ fn turn_metadata_includes_plan_mode_policy() {
     );
     assert!(text.contains("##### Mode: Plan"), "got: {text}");
     assert!(
-        text.contains("All writes, patches, shell commands, and code execution"),
+        text.contains("All writes, patches, shell commands,")
+            && text.contains("and code execution are blocked"),
         "got: {text}"
     );
 }

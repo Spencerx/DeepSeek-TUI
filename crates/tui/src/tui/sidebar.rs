@@ -23,7 +23,6 @@ use ratatui::{
 
 use crate::deepseek_theme::Theme;
 use crate::palette;
-use crate::tools::plan::StepStatus;
 use crate::tools::subagent::{AgentWorkerStatus, SubAgentStatus, localized_whale_display_names};
 use crate::tools::todo::TodoStatus;
 
@@ -484,13 +483,6 @@ struct SidebarWorkChecklistItem {
     status: TodoStatus,
 }
 
-#[derive(Debug, Clone)]
-struct SidebarWorkStrategyStep {
-    text: String,
-    status: StepStatus,
-    elapsed: String,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SidebarWorkSummary {
     goal_objective: Option<String>,
@@ -503,67 +495,18 @@ pub(crate) struct SidebarWorkSummary {
     tokens_used: u32,
     checklist_completion_pct: u8,
     checklist_items: Vec<SidebarWorkChecklistItem>,
-    strategy_explanation: Option<String>,
-    strategy_steps: Vec<SidebarWorkStrategyStep>,
     state_updating: bool,
     pause_indicator: Option<String>,
     workflow_paused: bool,
 }
 
 impl SidebarWorkSummary {
-    fn checklist_is_primary(&self) -> bool {
-        !self.checklist_items.is_empty()
-    }
-
-    fn checklist_is_complete(&self) -> bool {
-        self.checklist_is_primary()
-            && self
-                .checklist_items
-                .iter()
-                .all(|item| item.status == TodoStatus::Completed)
-    }
-
-    fn has_strategy(&self) -> bool {
-        self.strategy_explanation
-            .as_deref()
-            .is_some_and(|s| !s.trim().is_empty())
-            || !self.strategy_steps.is_empty()
-    }
-
     fn has_useful_content(&self) -> bool {
         self.goal_objective
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty())
             || !self.checklist_items.is_empty()
-            || self.has_strategy()
             || self.state_updating
-    }
-
-    fn strategy_counts(&self) -> (usize, usize, usize) {
-        let mut pending = 0;
-        let mut in_progress = 0;
-        let mut completed = 0;
-        for step in &self.strategy_steps {
-            match step.status {
-                StepStatus::Pending => pending += 1,
-                StepStatus::InProgress => in_progress += 1,
-                StepStatus::Completed => completed += 1,
-            }
-        }
-        (pending, in_progress, completed)
-    }
-
-    fn strategy_progress_percent(&self) -> u8 {
-        if self.strategy_steps.is_empty() {
-            return 0;
-        }
-        let completed = self
-            .strategy_steps
-            .iter()
-            .filter(|step| step.status == StepStatus::Completed)
-            .count();
-        let percent = completed.saturating_mul(100) / self.strategy_steps.len();
-        u8::try_from(percent).unwrap_or(u8::MAX)
     }
 
     fn compact_indicator(&self) -> Option<String> {
@@ -573,9 +516,6 @@ impl SidebarWorkSummary {
                 self.checklist_items.len(),
                 self.checklist_completion_pct
             ));
-        }
-        if self.has_strategy() {
-            return Some("Work plan active".to_string());
         }
         self.goal_objective
             .as_ref()
@@ -596,46 +536,16 @@ pub(crate) fn compact_work_indicator(app: &App) -> Option<String> {
         ));
     }
 
-    let plan = app.plan_state.try_lock().ok().map(|plan| !plan.is_empty());
-    if plan == Some(true) {
-        return Some("Work plan active".to_string());
-    }
     if app.hunt.quarry.is_some() || app.paused_quarry.is_some() {
         return Some("Work goal active".to_string());
     }
-    if todos.is_none() || plan.is_none() {
+    if todos.is_none() {
         return app
             .cached_work_summary
             .as_ref()
             .and_then(SidebarWorkSummary::compact_indicator);
     }
     None
-}
-
-fn should_render_strategy_step(
-    summary: &SidebarWorkSummary,
-    step: &SidebarWorkStrategyStep,
-) -> bool {
-    !summary.checklist_is_complete() || step.status == StepStatus::Completed
-}
-
-fn renderable_strategy_steps(summary: &SidebarWorkSummary) -> Vec<&SidebarWorkStrategyStep> {
-    summary
-        .strategy_steps
-        .iter()
-        .filter(|step| should_render_strategy_step(summary, step))
-        .collect()
-}
-
-fn has_renderable_strategy(summary: &SidebarWorkSummary) -> bool {
-    summary
-        .strategy_explanation
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty())
-        || summary
-            .strategy_steps
-            .iter()
-            .any(|step| should_render_strategy_step(summary, step))
 }
 
 fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
@@ -673,8 +583,6 @@ fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
 
     let fresh = (|| {
         let todos = app.todos.try_lock().ok()?;
-        let plan = app.plan_state.try_lock().ok()?;
-
         let snapshot = todos.snapshot();
         let checklist_completion_pct = snapshot.completion_pct;
         let checklist_items = snapshot
@@ -687,36 +595,6 @@ fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
             })
             .collect();
 
-        let (strategy_explanation, strategy_steps) = if plan.is_empty() {
-            (None, Vec::new())
-        } else {
-            // update_plan steers models toward artifact fields (objective,
-            // approach, constraints, ...) and away from duplicating the
-            // checklist, so a live plan often has neither `explanation` nor
-            // `plan[]` steps. Fall back to the strongest artifact field —
-            // otherwise the Work panel counts as contentless and disappears
-            // whenever agents are active (#3983).
-            let plan_snapshot = plan.snapshot();
-            let explanation = plan
-                .explanation()
-                .map(str::to_string)
-                .or(plan_snapshot.objective)
-                .or(plan_snapshot.title)
-                .or(plan_snapshot.recommended_approach)
-                .or(plan_snapshot.context_summary);
-            (
-                explanation,
-                plan.steps()
-                    .iter()
-                    .map(|step| SidebarWorkStrategyStep {
-                        text: step.text.clone(),
-                        status: step.status.clone(),
-                        elapsed: step.elapsed_str(),
-                    })
-                    .collect(),
-            )
-        };
-
         let mut summary = SidebarWorkSummary {
             goal_objective: live_goal_objective(app),
             goal_token_budget: app.hunt.token_budget,
@@ -726,8 +604,8 @@ fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
             tokens_used: app.session.total_conversation_tokens,
             checklist_completion_pct,
             checklist_items,
-            strategy_explanation,
-            strategy_steps,
+            // Strategy/plan remains compatibility state for saved sessions,
+            // but it is not a second user-facing progress surface.
             state_updating: false,
             pause_indicator: live_pause_indicator(app),
             workflow_paused: app.paused || app.paused_quarry.is_some(),
@@ -762,7 +640,7 @@ fn work_panel_lines(
     palette_mode: palette::PaletteMode,
     ui_theme: &palette::UiTheme,
 ) -> Vec<Line<'static>> {
-    let theme = Theme::for_palette_mode(palette_mode);
+    let _ = palette_mode;
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(max_rows.max(4));
 
     push_work_goal_lines(summary, content_width, max_rows, &mut lines, ui_theme);
@@ -775,7 +653,6 @@ fn work_panel_lines(
     }
 
     push_work_checklist_lines(summary, content_width, max_rows, &mut lines, ui_theme);
-    push_work_strategy_lines(summary, content_width, max_rows, &mut lines, &theme);
 
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -848,24 +725,18 @@ fn work_panel_hover_texts(
 
     if !summary.checklist_items.is_empty() && texts.len() < max_rows {
         let total = summary.checklist_items.len();
-        let completed = summary
+        let settled = summary
             .checklist_items
             .iter()
-            .filter(|item| item.status == TodoStatus::Completed)
+            .filter(|item| item.status.is_settled())
             .count();
         texts.push(format!(
-            "{}% complete ({completed}/{total})",
+            "{}% settled ({settled}/{total})",
             summary.checklist_completion_pct
         ));
 
-        let reserve_for_strategy = if has_renderable_strategy(summary) {
-            2
-        } else {
-            0
-        };
         let available_item_rows = max_rows
             .saturating_sub(texts.len())
-            .saturating_sub(reserve_for_strategy)
             .min(summary.checklist_items.len());
         let max_items =
             if summary.checklist_items.len() > available_item_rows && available_item_rows > 1 {
@@ -882,6 +753,7 @@ fn work_panel_hover_texts(
                 TodoStatus::Pending => "[ ]",
                 TodoStatus::InProgress => "[~]",
                 TodoStatus::Completed => "[✓]",
+                TodoStatus::Cancelled => "[-]",
             };
             texts.push(format!("{prefix} #{} {}", item.id, item.content));
         }
@@ -905,60 +777,11 @@ fn work_panel_hover_texts(
                     TodoStatus::Pending => "[ ]",
                     TodoStatus::InProgress => "[~]",
                     TodoStatus::Completed => "[✓]",
+                    TodoStatus::Cancelled => "[-]",
                 };
                 let _ = write!(label, "\n{prefix} #{} {}", item.id, item.content);
             }
             texts.push(label);
-        }
-    }
-
-    if has_renderable_strategy(summary) && texts.len() < max_rows {
-        let strategy_steps = renderable_strategy_steps(summary);
-
-        if !summary.checklist_is_primary() && !summary.strategy_steps.is_empty() {
-            let (pending, in_progress, completed) = summary.strategy_counts();
-            let total = pending + in_progress + completed;
-            texts.push(format!(
-                "Strategy metadata {}% complete ({completed}/{total})",
-                summary.strategy_progress_percent()
-            ));
-        } else {
-            texts.push(work_strategy_context_label(summary).to_string());
-        }
-
-        if let Some(explanation) = summary.strategy_explanation.as_deref()
-            && texts.len() < max_rows
-        {
-            texts.push(explanation.to_string());
-        }
-
-        let max_steps = max_rows
-            .saturating_sub(texts.len())
-            .min(strategy_steps.len());
-        let remaining = strategy_steps.len().saturating_sub(max_steps);
-        for step in strategy_steps.into_iter().take(max_steps) {
-            let prefix = match step.status {
-                StepStatus::Pending => "[ ]",
-                StepStatus::InProgress => "[~]",
-                StepStatus::Completed => "[✓]",
-            };
-            let mut text = if summary.checklist_is_primary() {
-                format!(
-                    "{} {}",
-                    strategy_context_step_prefix(&step.status),
-                    step.text
-                )
-            } else {
-                format!("{prefix} {}", step.text)
-            };
-            if !step.elapsed.is_empty() {
-                let _ = write!(text, " ({})", step.elapsed);
-            }
-            texts.push(text);
-        }
-
-        if remaining > 0 && texts.len() < max_rows {
-            texts.push(format!("+{remaining} more strategy steps"));
         }
     }
 
@@ -1082,10 +905,10 @@ fn push_work_checklist_lines(
     }
 
     let total = summary.checklist_items.len();
-    let completed = summary
+    let settled = summary
         .checklist_items
         .iter()
-        .filter(|item| item.status == TodoStatus::Completed)
+        .filter(|item| item.status.is_settled())
         .count();
     lines.push(Line::from(vec![
         Span::styled(
@@ -1093,19 +916,13 @@ fn push_work_checklist_lines(
             Style::default().fg(theme.success).bold(),
         ),
         Span::styled(
-            format!(" complete ({completed}/{total})"),
+            format!(" settled ({settled}/{total})"),
             Style::default().fg(theme.text_muted),
         ),
     ]));
 
-    let reserve_for_strategy = if has_renderable_strategy(summary) {
-        2
-    } else {
-        0
-    };
     let available_item_rows = max_rows
         .saturating_sub(lines.len())
-        .saturating_sub(reserve_for_strategy)
         .min(summary.checklist_items.len());
     let max_items =
         if summary.checklist_items.len() > available_item_rows && available_item_rows > 1 {
@@ -1118,15 +935,26 @@ fn push_work_checklist_lines(
         .saturating_add(max_items)
         .min(summary.checklist_items.len());
     for item in summary.checklist_items[start..end].iter() {
-        let (prefix, color) = match item.status {
-            TodoStatus::Pending => ("[ ]", theme.text_muted),
-            TodoStatus::InProgress => ("[~]", theme.warning),
-            TodoStatus::Completed => ("[✓]", theme.success),
+        let (prefix, style) = match item.status {
+            TodoStatus::Pending => ("[ ]", Style::default().fg(theme.text_muted)),
+            TodoStatus::InProgress => (
+                "[~]",
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            TodoStatus::Completed => ("[✓]", Style::default().fg(theme.success)),
+            TodoStatus::Cancelled => (
+                "[-]",
+                Style::default()
+                    .fg(theme.error_fg)
+                    .add_modifier(ratatui::style::Modifier::CROSSED_OUT),
+            ),
         };
         let text = format!("{prefix} #{} {}", item.id, item.content);
         lines.push(Line::from(Span::styled(
             truncate_line_to_width(&text, content_width),
-            Style::default().fg(color),
+            style,
         )));
     }
 
@@ -1159,114 +987,6 @@ fn checklist_window_start(items: &[SidebarWorkChecklistItem], max_items: usize) 
     active_idx
         .saturating_sub(max_items / 2)
         .min(items.len().saturating_sub(max_items))
-}
-
-fn push_work_strategy_lines(
-    summary: &SidebarWorkSummary,
-    content_width: usize,
-    max_rows: usize,
-    lines: &mut Vec<Line<'static>>,
-    theme: &Theme,
-) {
-    if !has_renderable_strategy(summary) || lines.len() >= max_rows {
-        return;
-    }
-
-    let checklist_is_primary = summary.checklist_is_primary();
-    let strategy_steps = renderable_strategy_steps(summary);
-    if !checklist_is_primary && !summary.strategy_steps.is_empty() {
-        let (pending, in_progress, completed) = summary.strategy_counts();
-        let total = pending + in_progress + completed;
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Strategy metadata ",
-                Style::default().fg(theme.plan_summary_color).bold(),
-            ),
-            Span::styled(
-                format!("{}%", summary.strategy_progress_percent()),
-                Style::default().fg(theme.plan_progress_color).bold(),
-            ),
-            Span::styled(
-                format!(" complete ({completed}/{total})"),
-                Style::default().fg(theme.plan_summary_color),
-            ),
-        ]));
-    } else {
-        lines.push(Line::from(Span::styled(
-            work_strategy_context_label(summary),
-            Style::default().fg(theme.plan_summary_color).bold(),
-        )));
-    }
-
-    if let Some(explanation) = summary.strategy_explanation.as_deref()
-        && lines.len() < max_rows
-    {
-        lines.push(Line::from(Span::styled(
-            truncate_line_to_width(explanation, content_width),
-            Style::default().fg(theme.plan_explanation_color),
-        )));
-    }
-
-    let max_steps = max_rows
-        .saturating_sub(lines.len())
-        .min(strategy_steps.len());
-    let remaining = strategy_steps.len().saturating_sub(max_steps);
-    for step in strategy_steps.into_iter().take(max_steps) {
-        let (prefix, color) = match step.status {
-            StepStatus::Pending => ("[ ]", theme.plan_pending_color),
-            StepStatus::InProgress => ("[~]", theme.plan_in_progress_color),
-            StepStatus::Completed => ("[✓]", theme.plan_completed_color),
-        };
-        let (text_prefix, color) = if checklist_is_primary {
-            (
-                strategy_context_step_prefix(&step.status),
-                strategy_context_step_color(&step.status, theme),
-            )
-        } else {
-            (prefix, color)
-        };
-        let mut text = format!("{text_prefix} {}", step.text);
-        if !step.elapsed.is_empty() {
-            let _ = write!(text, " ({})", step.elapsed);
-        }
-        lines.push(Line::from(Span::styled(
-            truncate_line_to_width(&text, content_width),
-            Style::default().fg(color),
-        )));
-    }
-
-    if remaining > 0 && lines.len() < max_rows {
-        lines.push(Line::from(Span::styled(
-            format!("+{remaining} more strategy steps"),
-            Style::default().fg(theme.plan_summary_color),
-        )));
-    }
-}
-
-fn work_strategy_context_label(summary: &SidebarWorkSummary) -> &'static str {
-    if summary.checklist_is_primary() {
-        "Strategy context"
-    } else {
-        "Strategy metadata"
-    }
-}
-
-fn strategy_context_step_prefix(status: &StepStatus) -> &'static str {
-    // Strategy = metadata/context/route (not a second checklist).
-    // Reserve "Phase" for Workflow stages only (#4135).
-    match status {
-        StepStatus::Pending => "route next:",
-        StepStatus::InProgress => "route now:",
-        StepStatus::Completed => "route done:",
-    }
-}
-
-fn strategy_context_step_color(status: &StepStatus, theme: &Theme) -> ratatui::style::Color {
-    match status {
-        StepStatus::Pending => theme.plan_pending_color,
-        StepStatus::InProgress => theme.plan_in_progress_color,
-        StepStatus::Completed => theme.plan_summary_color,
-    }
 }
 
 #[must_use]
@@ -1303,14 +1023,6 @@ fn render_sidebar_work_compact(f: &mut Frame, area: Rect, app: &mut App) {
             if count == 1 { "" } else { "s" },
             summary.checklist_completion_pct
         )
-    } else if summary.has_strategy() {
-        let (pending, in_progress, completed) = summary.strategy_counts();
-        let total = pending + in_progress + completed;
-        if total == 0 {
-            "plan active".to_string()
-        } else {
-            format!("plan {completed}/{total} · {in_progress} active")
-        }
     } else if summary.goal_objective.is_some() {
         "goal active".to_string()
     } else {
@@ -1995,7 +1707,7 @@ fn sidebar_tool_row_from_cell(cell: &HistoryCell) -> Option<SidebarToolRow> {
             })
         }
         ToolCell::PlanUpdate(plan) => Some(SidebarToolRow {
-            name: "update_plan".to_string(),
+            name: "legacy plan".to_string(),
             status: plan.status,
             summary: plan
                 .snapshot
@@ -3613,21 +3325,20 @@ mod tests {
         ACTIVE_TOOL_COMPLETED_ROW_TTL, ACTIVE_TOOL_STALE_RUNNING_ROW_TTL, AutoSidebarPanel,
         AutoSidebarState, HotbarSlotState, SidebarAgentRow, SidebarFocus, SidebarHoverRow,
         SidebarHoverSection, SidebarHoverState, SidebarSubagentSummary, SidebarToolRow,
-        SidebarWorkChecklistItem, SidebarWorkStrategyStep, SidebarWorkSummary, ToolRowOrder,
-        agent_row_hover_text, auto_sidebar_panels, background_task_spinner_prefix,
-        cached_agent_activity_is_live, context_panel_cost_line, editorial_tool_rows,
-        hotbar_panel_enabled, hotbar_panel_hover_texts, hotbar_panel_lines, hotbar_panel_slots,
-        is_hotbar_disabled, normalize_activity_text, render_sidebar, sidebar_agent_rows,
-        sidebar_hover_rows, sidebar_work_summary, sort_sidebar_agent_rows_as_tree,
-        subagent_output_handle, subagent_panel_hover_texts, subagent_panel_lines,
-        subagent_panel_rows, task_panel_hover_texts, task_panel_lines, task_panel_row_sets,
-        task_panel_rows, work_panel_empty_hint, work_panel_hover_texts, work_panel_lines,
+        SidebarWorkChecklistItem, SidebarWorkSummary, ToolRowOrder, agent_row_hover_text,
+        auto_sidebar_panels, background_task_spinner_prefix, cached_agent_activity_is_live,
+        context_panel_cost_line, editorial_tool_rows, hotbar_panel_enabled,
+        hotbar_panel_hover_texts, hotbar_panel_lines, hotbar_panel_slots, is_hotbar_disabled,
+        normalize_activity_text, render_sidebar, sidebar_agent_rows, sidebar_hover_rows,
+        sidebar_work_summary, sort_sidebar_agent_rows_as_tree, subagent_output_handle,
+        subagent_panel_hover_texts, subagent_panel_lines, subagent_panel_rows,
+        task_panel_hover_texts, task_panel_lines, task_panel_row_sets, task_panel_rows,
+        work_panel_empty_hint, work_panel_hover_texts, work_panel_lines,
     };
     use crate::config::Config;
     use crate::localization::Locale;
     use crate::palette;
     use crate::palette::PaletteMode;
-    use crate::tools::plan::StepStatus;
     use crate::tools::todo::TodoStatus;
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
@@ -4180,7 +3891,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_metadata_only_plan_reports_active_without_zero_counts() {
+    fn compact_metadata_only_plan_does_not_create_progress_surface() {
         let mut app = create_test_app();
         app.sidebar_focus = SidebarFocus::Agents;
         app.plan_state
@@ -4202,7 +3913,11 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("plan active"), "{rendered:?}");
+        assert!(!rendered.contains("plan active"), "{rendered:?}");
+        assert!(
+            !rendered.contains("metadata-only release plan"),
+            "{rendered:?}"
+        );
         assert!(!rendered.contains("0/0"), "{rendered:?}");
     }
 
@@ -4281,19 +3996,6 @@ mod tests {
                     status: TodoStatus::Pending,
                 },
             ],
-            strategy_explanation: Some("Keep the UI unified".to_string()),
-            strategy_steps: vec![
-                SidebarWorkStrategyStep {
-                    text: "Simplify sidebar".to_string(),
-                    status: StepStatus::Completed,
-                    elapsed: String::new(),
-                },
-                SidebarWorkStrategyStep {
-                    text: "Update prompts".to_string(),
-                    status: StepStatus::Pending,
-                    elapsed: String::new(),
-                },
-            ],
             ..SidebarWorkSummary::default()
         };
 
@@ -4306,7 +4008,7 @@ mod tests {
         ));
 
         assert!(
-            text[0].starts_with("33% complete (1/3)"),
+            text[0].starts_with("33% settled (1/3)"),
             "checklist should lead: {text:?}"
         );
         assert!(
@@ -4314,34 +4016,18 @@ mod tests {
             "in-progress checklist item should be visible: {text:?}"
         );
         assert!(
-            !text.iter().any(|line| line.contains("50% complete")),
+            !text.iter().any(|line| line.contains("50% settled")),
             "strategy progress must not render as a second progress bar when checklist exists: {text:?}"
         );
         assert!(
-            text.iter().any(|line| line == "Strategy context"),
-            "strategy should be grouped as context for the checklist: {text:?}"
-        );
-        assert!(
-            text.iter()
-                .any(|line| line.contains("route done: Simplify sidebar")),
-            "completed strategy steps should render as route context: {text:?}"
-        );
-        assert!(
-            text.iter()
-                .any(|line| line.contains("route next: Update prompts")),
-            "pending strategy steps should render as route context: {text:?}"
-        );
-        assert!(
-            !text
-                .iter()
-                .any(|line| line.contains("[✓] Simplify sidebar"))
-                && !text.iter().any(|line| line.contains("[ ] Update prompts")),
-            "strategy rows must not look like a second To-do when To-do items exist: {text:?}"
+            !text.iter().any(|line| line.contains("Strategy"))
+                && !text.iter().any(|line| line.contains("route ")),
+            "legacy strategy state must not render beside canonical To-do: {text:?}"
         );
     }
 
     #[test]
-    fn work_panel_hover_renders_strategy_as_context_while_checklist_incomplete() {
+    fn work_panel_hover_ignores_legacy_strategy_state() {
         let summary = SidebarWorkSummary {
             checklist_completion_pct: 0,
             checklist_items: vec![SidebarWorkChecklistItem {
@@ -4349,45 +4035,21 @@ mod tests {
                 content: "Wire tool execution".to_string(),
                 status: TodoStatus::InProgress,
             }],
-            strategy_explanation: Some("Keep strategy and checklist linked".to_string()),
-            strategy_steps: vec![
-                SidebarWorkStrategyStep {
-                    text: "Map phase boundaries".to_string(),
-                    status: StepStatus::Completed,
-                    elapsed: String::new(),
-                },
-                SidebarWorkStrategyStep {
-                    text: "Implement counted work".to_string(),
-                    status: StepStatus::InProgress,
-                    elapsed: String::new(),
-                },
-            ],
             ..SidebarWorkSummary::default()
         };
 
         let hover = work_panel_hover_texts(&summary, 80, 16);
 
         assert!(
-            hover.iter().any(|line| line == "Strategy context"),
-            "hover should name strategy as context when checklist exists: {hover:?}"
-        );
-        assert!(
             hover
                 .iter()
-                .any(|line| line.contains("route done: Map phase boundaries")),
-            "hover strategy rows should be route context: {hover:?}"
+                .any(|line| line.contains("Wire tool execution")),
+            "canonical To-do remains inspectable: {hover:?}"
         );
         assert!(
-            hover
-                .iter()
-                .any(|line| line.contains("route now: Implement counted work")),
-            "hover should expose the active strategy route without To-do markers: {hover:?}"
-        );
-        assert!(
-            !hover
-                .iter()
-                .any(|line| line.contains("[✓] Map phase boundaries")),
-            "hover strategy rows must not look like a second checklist: {hover:?}"
+            !hover.iter().any(|line| line.contains("Strategy"))
+                && !hover.iter().any(|line| line.contains("route ")),
+            "legacy strategy state leaked into hover: {hover:?}"
         );
     }
 
@@ -4407,24 +4069,6 @@ mod tests {
                     status: TodoStatus::Completed,
                 },
             ],
-            strategy_explanation: Some("Old plan metadata".to_string()),
-            strategy_steps: vec![
-                SidebarWorkStrategyStep {
-                    text: "Completed context".to_string(),
-                    status: StepStatus::Completed,
-                    elapsed: String::new(),
-                },
-                SidebarWorkStrategyStep {
-                    text: "Stale active phase".to_string(),
-                    status: StepStatus::InProgress,
-                    elapsed: String::new(),
-                },
-                SidebarWorkStrategyStep {
-                    text: "Stale next phase".to_string(),
-                    status: StepStatus::Pending,
-                    elapsed: String::new(),
-                },
-            ],
             ..SidebarWorkSummary::default()
         };
 
@@ -4439,18 +4083,9 @@ mod tests {
 
         for rendered in [&display, &hover] {
             assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.contains("route done: Completed context")),
-                "completed strategy context may still render: {rendered:?}"
-            );
-            assert!(
-                !rendered.iter().any(|line| line.contains("route now:")),
-                "stale in-progress strategy must not render as active work: {rendered:?}"
-            );
-            assert!(
-                !rendered.iter().any(|line| line.contains("route next:")),
-                "stale pending strategy must not render as upcoming work: {rendered:?}"
+                !rendered.iter().any(|line| line.contains("route "))
+                    && !rendered.iter().any(|line| line.contains("Old plan")),
+                "legacy strategy must never render as progress: {rendered:?}"
             );
         }
     }
@@ -4496,6 +4131,41 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_todo_is_crossed_out_and_distinct_from_completed() {
+        let summary = SidebarWorkSummary {
+            checklist_completion_pct: 100,
+            checklist_items: vec![SidebarWorkChecklistItem {
+                id: 7,
+                content: "Discard obsolete route".to_string(),
+                status: TodoStatus::Cancelled,
+            }],
+            ..SidebarWorkSummary::default()
+        };
+        let lines = work_panel_lines(&summary, 80, 8, PaletteMode::Dark, &palette::UI_THEME);
+        assert_eq!(
+            lines_to_text(&lines).first().map(String::as_str),
+            Some("100% settled (1/1)")
+        );
+        let span = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("Discard obsolete route"))
+            .expect("cancelled row");
+        assert!(span.content.starts_with("[-]"));
+        assert!(
+            span.style
+                .add_modifier
+                .contains(ratatui::style::Modifier::CROSSED_OUT)
+        );
+        assert_eq!(
+            work_panel_hover_texts(&summary, 80, 8)
+                .first()
+                .map(String::as_str),
+            Some("100% settled (1/1)")
+        );
+    }
+
+    #[test]
     fn work_panel_overflow_hover_lists_omitted_checklist_items() {
         let summary = SidebarWorkSummary {
             checklist_completion_pct: 38,
@@ -4537,7 +4207,7 @@ mod tests {
     }
 
     #[test]
-    fn work_panel_includes_strategy_only_when_plan_state_is_non_empty() {
+    fn work_panel_never_renders_legacy_strategy_state() {
         let empty_text = lines_to_text(&work_panel_lines(
             &SidebarWorkSummary::default(),
             80,
@@ -4550,10 +4220,7 @@ mod tests {
             "empty plan state should not show strategy: {empty_text:?}"
         );
 
-        let summary = SidebarWorkSummary {
-            strategy_explanation: Some("High-level sequencing".to_string()),
-            ..SidebarWorkSummary::default()
-        };
+        let summary = SidebarWorkSummary::default();
         let text = lines_to_text(&work_panel_lines(
             &summary,
             80,
@@ -4562,18 +4229,16 @@ mod tests {
             &palette::UI_THEME,
         ));
         assert!(
-            text.iter().any(|line| line == "Strategy metadata"),
-            "non-empty plan should show strategy label: {text:?}"
-        );
-        assert!(
-            text.iter()
-                .any(|line| line.contains("High-level sequencing")),
-            "non-empty plan explanation should render: {text:?}"
+            !text.iter().any(|line| line.contains("Strategy"))
+                && !text
+                    .iter()
+                    .any(|line| line.contains("High-level sequencing")),
+            "legacy plan state must not create a second panel: {text:?}"
         );
     }
 
     #[test]
-    fn metadata_only_plan_counts_as_work_content() {
+    fn metadata_only_plan_does_not_count_as_visible_work_content() {
         use crate::tools::plan::UpdatePlanArgs;
 
         let mut app = create_test_app();
@@ -4587,16 +4252,7 @@ mod tests {
         }
 
         let summary = sidebar_work_summary(&mut app);
-        assert!(
-            summary.has_strategy(),
-            "a plan carrying only artifact fields must still surface as strategy (#3983)"
-        );
-        assert!(summary.has_useful_content());
-        assert_eq!(
-            summary.strategy_explanation.as_deref(),
-            Some("Ship the catalog lane"),
-            "objective should back-fill the missing explanation"
-        );
+        assert!(!summary.has_useful_content());
     }
 
     #[test]
@@ -4725,26 +4381,6 @@ mod tests {
 
     #[test]
     fn workflow_vocab_avoids_dual_meanings_in_work_and_activity_copy() {
-        // #4135 copy audit: To-do / Strategy / Phase / Activity stay distinct.
-        assert_eq!(
-            super::strategy_context_step_prefix(&StepStatus::Pending),
-            "route next:"
-        );
-        assert_eq!(
-            super::strategy_context_step_prefix(&StepStatus::InProgress),
-            "route now:"
-        );
-        assert_eq!(
-            super::strategy_context_step_prefix(&StepStatus::Completed),
-            "route done:"
-        );
-        for prefix in ["route next:", "route now:", "route done:"] {
-            assert!(
-                !prefix.contains("phase"),
-                "Strategy route prefixes must not reuse Workflow Phase vocabulary: {prefix}"
-            );
-        }
-
         let summary = SidebarWorkSummary {
             checklist_completion_pct: 10,
             checklist_items: (1..=6)
@@ -4758,11 +4394,6 @@ mod tests {
                     },
                 })
                 .collect(),
-            strategy_steps: vec![SidebarWorkStrategyStep {
-                text: "Approach".to_string(),
-                status: StepStatus::Pending,
-                elapsed: String::new(),
-            }],
             ..SidebarWorkSummary::default()
         };
         let text = lines_to_text(&work_panel_lines(
@@ -4783,10 +4414,7 @@ mod tests {
                 && !joined.contains("phase done:"),
             "Strategy context must not use Phase labels: {text:?}"
         );
-        assert!(
-            joined.contains("route next:") || joined.contains("Strategy context"),
-            "Strategy context should use route prefixes under To-do: {text:?}"
-        );
+        assert!(!joined.contains("Strategy") && !joined.contains("route "));
 
         let mut app = create_test_app();
         app.sidebar_focus = SidebarFocus::Tasks;

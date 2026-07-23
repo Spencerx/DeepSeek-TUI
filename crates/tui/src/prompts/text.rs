@@ -235,7 +235,8 @@ pub const AGENT_MODE: &str = r#"##### Mode: Agent
 Execute the user's task autonomously. Read-only actions run directly; mutations
 follow the active approval policy. Use `File`, `Git`, `Run`, and `Bash` for their
 documented actions. Keep `work_update` current only for genuinely multi-step
-work; use `update_plan` for a strategy artifact, not a duplicate checklist.
+work. It is the one user-facing progress list; do not create a parallel
+strategy checklist.
 
 Delegate independent work when it improves throughput. Treat runtime and
 sub-agent completion events as internal evidence, verify load-bearing child
@@ -247,10 +248,13 @@ Do not announce the mode or its approval mechanics.
 /// Plan mode delta.
 pub const PLAN_MODE: &str = r#"##### Mode: Plan
 
-Investigate with read-only tools, then call `update_plan` with the grounded
-implementation plan. All writes, patches, shell commands, and code execution
-are blocked. Read-only sub-agents are allowed. After presenting the plan, wait
-for the user's accept, revise, or exit decision. Do not announce the mode.
+Investigate with read-only tools, keep the canonical list in `work_update`,
+then present the grounded implementation contract in your response. There is
+no second Strategy/Plan progress surface. All writes, patches, shell commands,
+and code execution are blocked. Read-only
+sub-agents are allowed. After presenting the plan, ask the user to reply with
+revisions or switch to Act (`/mode act`) to implement, then wait. Do not
+announce the mode.
 "#;
 /// Full-access mode delta.
 pub const YOLO_MODE: &str = r#"##### Mode: YOLO
@@ -291,8 +295,7 @@ Read-only operations run silently. Write operations (file edits, patches, shell 
 
 When you need approval:
 1. For multi-step changes, lay out your approach with `work_update`.
-2. For complex changes, also use `update_plan` for Strategy metadata/context/route.
-3. The user will see your proposed action and can approve or deny it.
+2. The user will see your proposed action and can approve or deny it.
 
 Decomposition is your best tool for earning approvals. A clear plan with verifiable steps gets approved faster than an opaque request.
 
@@ -304,7 +307,7 @@ pub const NEVER_APPROVAL: &str = r#"##### Approval Policy: Never — Tier 2 (Sta
 All write operations are blocked. You can read, search, and investigate, but you cannot modify the workspace.
 
 This is a read-only mode. Use it to:
-- Build thorough plans with `work_update` and, for complex initiatives, `update_plan` Strategy metadata.
+- Build thorough plans with the one canonical `work_update` list.
 - Investigate codebases, trace logic, and gather context.
 - Spawn read-only sub-agents for parallel exploration.
 
@@ -454,8 +457,8 @@ Read-only tools (reads, searches, persistent RLM session tools, git inspection) 
 Any write, patch, shell execution, sub-agent start, or CSV batch operation will ask for approval first.
 
 Before requesting approval for multi-step writes, lay out your work with `work_update` so the user
-can see what you intend to do and approve with context. Complex changes should also get
-`update_plan` Strategy metadata first. For simple writes, state the direct edit and proceed through the normal approval
+can see what you intend to do and approve with context. Do not create a second
+strategy checklist. For simple writes, state the direct edit and proceed through the normal approval
 flow.
 
 ## Sub-agent completion sentinel

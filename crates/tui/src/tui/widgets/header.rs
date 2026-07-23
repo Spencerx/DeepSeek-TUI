@@ -648,7 +648,7 @@ mod tests {
         );
 
         // Wave 7: the Agent mode chip reads "Act".
-        assert!(rendered.contains("cw"));
+        assert!(rendered.contains("🐳"));
         assert!(rendered.contains("act"));
         assert!(rendered.contains("deepseek-v4-pro"));
         assert!(!rendered.contains("Plan"));
@@ -678,10 +678,10 @@ mod tests {
     }
 
     #[test]
-    fn narrow_header_drops_version_chip_before_dropping_mode() {
+    fn narrow_header_keeps_brand_and_context_after_dropping_version_and_mode() {
         // Very tight width budget — the version is among the first
-        // chips to disappear; the mode label must still render.
-        // YOLO is invisible Act+Bypass shorthand, so the chip reads "Act".
+        // chips to disappear. At this width the live brand and context receipt
+        // are the two surviving signals.
         let rendered = render_header(
             HeaderData::new(
                 AppMode::Yolo,
@@ -698,10 +698,8 @@ mod tests {
             !rendered.contains(&version),
             "version chip should drop under width pressure: {rendered:?}",
         );
-        assert!(
-            rendered.contains("act") || rendered.contains('a'),
-            "mode label must survive: {rendered:?}",
-        );
+        assert!(rendered.contains("🐳"), "brand must survive: {rendered:?}");
+        assert!(rendered.contains('%'), "context must survive: {rendered:?}");
     }
 
     #[test]
@@ -739,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_header_falls_back_to_mode_without_rendering_all_modes() {
+    fn narrow_header_keeps_brand_without_rendering_modes() {
         let rendered = render_header(
             HeaderData::new(
                 AppMode::Yolo,
@@ -752,10 +750,8 @@ mod tests {
             8,
         );
 
-        // YOLO renders as Act; under extreme width pressure only the first
-        // glyph of the mode chip remains.
-        assert!(rendered.trim_start().starts_with("cw"));
-        assert!(rendered.contains("act"));
+        assert!(rendered.trim_start().starts_with("🐳"));
+        assert!(!rendered.contains("act"));
         assert!(!rendered.contains("Plan"));
         assert!(!rendered.contains("Operate"));
     }

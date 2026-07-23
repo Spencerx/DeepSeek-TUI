@@ -52,7 +52,6 @@ pub(super) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
     // legacy `task_create`/`task_list`/`task_read` names it replaces are
     // hidden compat aliases and must not be default-active.
     "tasks",
-    "update_plan",
     "work_update",
 ];
 
@@ -356,25 +355,7 @@ fn active_tool_list_from_catalog(catalog: &[Tool], active: &HashSet<String>) -> 
     head
 }
 
-pub(super) fn active_tools_for_step(
-    catalog: &[Tool],
-    active: &HashSet<String>,
-    force_update_plan: bool,
-) -> Vec<Tool> {
-    // DeepSeek reasoning models reject explicit named tool_choice forcing here,
-    // so for obvious quick-plan asks we narrow the first-step tool surface to
-    // update_plan instead.
-    if force_update_plan {
-        let forced: Vec<_> = catalog
-            .iter()
-            .filter(|tool| tool.name == "update_plan")
-            .cloned()
-            .collect();
-        if !forced.is_empty() {
-            return forced;
-        }
-    }
-
+pub(super) fn active_tools_for_step(catalog: &[Tool], active: &HashSet<String>) -> Vec<Tool> {
     active_tool_list_from_catalog(catalog, active)
 }
 

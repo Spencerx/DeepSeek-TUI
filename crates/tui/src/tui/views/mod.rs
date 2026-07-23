@@ -36,7 +36,6 @@ pub enum ModalKind {
     Approval,
     Elevation,
     UserInput,
-    PlanPrompt,
     CommandPalette,
     Help,
     SubAgents,
@@ -659,10 +658,6 @@ pub enum ViewEvent {
         value: String,
         persist: bool,
     },
-    PlanPromptSelected {
-        option: usize,
-    },
-    PlanPromptDismissed,
     SubAgentsRefresh,
     SidebarAgentCancel {
         agent_id: String,
@@ -2578,6 +2573,7 @@ fn config_label_for_key_for_locale(locale: Locale, key: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn config_label_for_key(key: &str) -> String {
     config_label_for_key_for_locale(Locale::En, key)
 }

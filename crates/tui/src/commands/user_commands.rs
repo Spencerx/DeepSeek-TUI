@@ -687,6 +687,7 @@ mod tests {
             app.plan_state
                 .try_lock()
                 .expect("plan_state lock")
+                .snapshot()
                 .is_empty(),
             "previous command's plan must be cleared on new command dispatch"
         );

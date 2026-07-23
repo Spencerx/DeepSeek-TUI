@@ -104,8 +104,6 @@ use crate::tui::notifications;
 use crate::tui::onboarding;
 use crate::tui::pager::PagerView;
 use crate::tui::persistence_actor::{self, PersistRequest};
-use crate::tui::plan_prompt::PlanPromptView;
-use crate::tui::plan_todo_bridge::{PlanAcceptance, project_accepted_plan};
 use crate::tui::scrolling::TranscriptScroll;
 use crate::work_graph::task_owner_snapshot;
 // SelectionAutoscroll unused
@@ -2829,9 +2827,6 @@ async fn run_event_loop(
                             tracing::debug!(tool_id = %id, tool_name = %name, "ignored foreign or replayed evidence completion");
                             continue;
                         }
-                        if name == "update_plan" {
-                            app.plan_tool_used_in_turn = true;
-                        }
                         if is_model_visible_tool_call(&id) {
                             let tool_content = match &result {
                                 Ok(output) => sanitize_stream_chunk(
@@ -2952,7 +2947,6 @@ async fn run_event_loop(
                         app.reasoning_header = None;
                         app.last_reasoning = None;
                         app.pending_tool_uses.clear();
-                        app.plan_tool_used_in_turn = false;
                         last_status_frame = Instant::now();
                     }
                     EngineEvent::TurnComplete {
@@ -3360,57 +3354,6 @@ async fn run_event_loop(
                                 });
                             }
                         }
-
-                        if app.mode == AppMode::Plan
-                            && app.plan_tool_used_in_turn
-                            && !app.plan_prompt_pending
-                            && app.queued_message_count() == 0
-                            && app.queued_draft.is_none()
-                        {
-                            let review_plan = match app.runtime_services.work.as_ref().map(|work| {
-                                work.plan_review_for_confirmation(app.current_session_id.as_deref())
-                            }) {
-                                Some(Ok(Some((proposal_id, proposed, summary)))) => {
-                                    Ok((Some(proposal_id), proposed, Some(summary)))
-                                }
-                                None => Ok((None, app.plan_state.lock().await.snapshot(), None)),
-                                Some(Ok(None)) => {
-                                    Ok((None, app.plan_state.lock().await.snapshot(), None))
-                                }
-                                Some(Err(err)) => Err(err),
-                            };
-                            match review_plan {
-                                Ok((proposal_id, plan, summary)) => {
-                                    app.pending_plan_proposal_id = proposal_id;
-                                    app.plan_prompt_pending = true;
-                                    app.add_message(HistoryCell::System {
-                                        content: plan_next_step_prompt(),
-                                    });
-                                    if app.view_stack.top_kind() != Some(ModalKind::PlanPrompt) {
-                                        let todos = Some(app.todos.lock().await.snapshot());
-                                        app.view_stack.push(
-                                            PlanPromptView::new(Some(plan))
-                                                .with_plan_diff_summary(summary)
-                                                .with_todos(todos),
-                                        );
-                                    }
-                                }
-                                Err(err) => {
-                                    tracing::warn!(
-                                        error = %err,
-                                        "validated Plan diff could not be rendered for review"
-                                    );
-                                    app.plan_prompt_pending = false;
-                                    app.pending_plan_proposal_id = None;
-                                    let message = format!(
-                                        "Plan review is unavailable; no proposal was accepted ({err})"
-                                    );
-                                    app.status_message = Some(message.clone());
-                                    app.add_message(HistoryCell::System { content: message });
-                                }
-                            }
-                        }
-                        app.plan_tool_used_in_turn = false;
 
                         // Legacy pending-steer recovery. Current keyboard
                         // handling keeps Esc as cancel-only, but older saved
@@ -6218,9 +6161,6 @@ async fn run_event_loop(
                         }
                     }
                     if let Some(input) = app.handle_composer_enter() {
-                        if handle_plan_choice(app, config, &engine_handle, &input).await? {
-                            continue;
-                        }
                         // `# foo` quick-add (#492) — when memory is enabled,
                         // a single line starting with `#` (but not `##` /
                         // `#!` shebangs / Markdown headings the user might
@@ -8647,8 +8587,6 @@ enum DispatchRecovery {
     Queued { restore_index: Option<usize> },
     /// Initial `--prompt` / startup input.
     Initial,
-    /// Plan accept followup.
-    PlanFollowup,
 }
 
 /// Snapshot of App state taken before the sync prepare phase so a failed
@@ -9234,13 +9172,6 @@ fn build_dispatch_error_closure(
                 DispatchRecovery::Initial => {
                     app.status_message = Some(
                         app.tr(MessageId::DispatchFailedInitial)
-                            .replace("{error}", &error),
-                    );
-                }
-                DispatchRecovery::PlanFollowup => {
-                    app.queue_message(prepare.message);
-                    app.status_message = Some(
-                        app.tr(MessageId::DispatchFailedPlanFollowup)
                             .replace("{error}", &error),
                     );
                 }
@@ -11827,163 +11758,6 @@ fn merge_pending_steers(app: &mut App) -> Option<QueuedMessage> {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlanChoice {
-    AcceptAgent,
-    AcceptYolo,
-    RevisePlan,
-    ExitPlan,
-}
-
-fn plan_next_step_prompt() -> String {
-    [
-        "Action required: choose the next step for this plan.",
-        "  1) Accept + implement in Act mode",
-        "  2) Accept + implement with Full Access (trusted workspace)",
-        "  3) Revise the plan / ask follow-ups",
-        "  4) Return to Act mode without implementing",
-        "",
-        "Use the plan confirmation popup, or type 1-4 and press Enter.",
-    ]
-    .join("\n")
-}
-
-fn plan_choice_from_option(option: usize) -> Option<PlanChoice> {
-    match option {
-        1 => Some(PlanChoice::AcceptAgent),
-        2 => Some(PlanChoice::AcceptYolo),
-        3 => Some(PlanChoice::RevisePlan),
-        4 => Some(PlanChoice::ExitPlan),
-        _ => None,
-    }
-}
-
-fn parse_plan_choice(input: &str) -> Option<PlanChoice> {
-    // Once the modal is dismissed, only the advertised 1-4 fallback remains active.
-    // Letter shortcuts stay modal-only so normal messages like "yolo" are not captured.
-    match input.trim() {
-        "1" => Some(PlanChoice::AcceptAgent),
-        "2" => Some(PlanChoice::AcceptYolo),
-        "3" => Some(PlanChoice::RevisePlan),
-        "4" => Some(PlanChoice::ExitPlan),
-        _ => None,
-    }
-}
-
-async fn apply_plan_choice(
-    app: &mut App,
-    config: &Config,
-    engine_handle: &EngineHandle,
-    choice: PlanChoice,
-) -> Result<()> {
-    let acceptance = match choice {
-        PlanChoice::AcceptAgent => PlanAcceptance::AcceptAct,
-        PlanChoice::AcceptYolo => PlanAcceptance::AcceptFullAccess,
-        PlanChoice::RevisePlan => PlanAcceptance::Revise,
-        PlanChoice::ExitPlan => PlanAcceptance::Exit,
-    };
-    project_accepted_plan(
-        app.runtime_services.work.as_ref(),
-        app.current_session_id.as_deref(),
-        acceptance,
-        app.pending_plan_proposal_id.as_ref(),
-    )
-    .await
-    .map_err(|err| anyhow::anyhow!("failed to project accepted plan: {err}"))?;
-    app.pending_plan_proposal_id = None;
-    persist_pending_work_checkpoint(app)
-        .await
-        .map_err(|err| anyhow::anyhow!("accepted plan was not checkpointed: {err}"))?;
-
-    match choice {
-        PlanChoice::AcceptAgent => {
-            apply_mode_update(app, engine_handle, AppMode::Agent).await;
-            app.add_message(HistoryCell::System {
-                content: "Plan accepted. Switching to Act mode and starting implementation."
-                    .to_string(),
-            });
-            let followup = QueuedMessage::new("Proceed with the accepted plan.".to_string(), None);
-            if app.is_loading {
-                app.queue_message(followup);
-                app.status_message = Some("Queued accepted plan execution (Act mode).".to_string());
-            } else {
-                dispatch_user_message_with_recovery(
-                    app,
-                    config,
-                    engine_handle,
-                    followup,
-                    DispatchRecovery::PlanFollowup,
-                )
-                .await?;
-            }
-        }
-        PlanChoice::AcceptYolo => {
-            apply_mode_update(app, engine_handle, AppMode::Yolo).await;
-            app.add_message(HistoryCell::System {
-                content:
-                    "Plan accepted. Switching to Act + Full Access and starting implementation."
-                        .to_string(),
-            });
-            let followup = QueuedMessage::new("Proceed with the accepted plan.".to_string(), None);
-            if app.is_loading {
-                app.queue_message(followup);
-                app.status_message =
-                    Some("Queued accepted plan execution (Act + Full Access).".to_string());
-            } else {
-                dispatch_user_message_with_recovery(
-                    app,
-                    config,
-                    engine_handle,
-                    followup,
-                    DispatchRecovery::PlanFollowup,
-                )
-                .await?;
-            }
-        }
-        PlanChoice::RevisePlan => {
-            let prompt = "Revise the plan: ";
-            app.input = prompt.to_string();
-            app.cursor_position = prompt.chars().count();
-            app.status_message = Some("Revise the plan and press Enter.".to_string());
-        }
-        PlanChoice::ExitPlan => {
-            apply_mode_update(app, engine_handle, AppMode::Agent).await;
-            app.add_message(HistoryCell::System {
-                content: concat!(
-                    "Exited Plan mode. Switched to Act mode.\n\n",
-                    "The plan above is for reference only. ",
-                    "Do NOT execute it until the user explicitly asks you to. ",
-                    "Wait for the user's next instruction before taking any action.",
-                )
-                .to_string(),
-            });
-        }
-    }
-
-    Ok(())
-}
-
-async fn handle_plan_choice(
-    app: &mut App,
-    config: &Config,
-    engine_handle: &EngineHandle,
-    input: &str,
-) -> Result<bool> {
-    if !app.plan_prompt_pending {
-        return Ok(false);
-    }
-
-    let choice = parse_plan_choice(input);
-    app.plan_prompt_pending = false;
-
-    let Some(choice) = choice else {
-        return Ok(false);
-    };
-
-    apply_plan_choice(app, config, engine_handle, choice).await?;
-    Ok(true)
-}
-
 /// Build the pending-input preview widget from current `App` state.
 ///
 /// v0.6.6 (#122) wires all three buckets:
@@ -13132,22 +12906,6 @@ async fn handle_view_events(
                 app.add_message(HistoryCell::System {
                     content: "User input cancelled".to_string(),
                 });
-            }
-            ViewEvent::PlanPromptSelected { option } => {
-                if app.plan_prompt_pending {
-                    app.plan_prompt_pending = false;
-                    if let Some(choice) = plan_choice_from_option(option)
-                        && let Err(err) =
-                            apply_plan_choice(app, config, engine_handle, choice).await
-                    {
-                        app.status_message = Some(format!("Failed to apply plan selection: {err}"));
-                    }
-                }
-            }
-            ViewEvent::PlanPromptDismissed => {
-                app.plan_prompt_pending = true;
-                app.status_message =
-                    Some("Plan prompt closed. Type 1-4 and press Enter to choose.".to_string());
             }
             ViewEvent::SessionSelected { session_id } => {
                 let manager = match SessionManager::default_location() {

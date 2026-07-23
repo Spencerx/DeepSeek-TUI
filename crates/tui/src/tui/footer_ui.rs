@@ -644,7 +644,7 @@ fn collect_active_tool_status(
             }
         }
         ToolCell::PlanUpdate(plan) => {
-            snapshot.record("update Strategy".to_string(), plan.status, None);
+            snapshot.record("legacy plan update".to_string(), plan.status, None);
         }
         ToolCell::PatchSummary(patch) => {
             snapshot.record(format!("patch {}", patch.path), patch.status, None);

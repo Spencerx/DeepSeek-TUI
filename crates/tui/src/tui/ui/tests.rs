@@ -2643,44 +2643,6 @@ fn file_tree_shortcut_does_not_steal_plain_ctrl_e() {
 }
 
 #[test]
-fn parse_plan_choice_accepts_numbers() {
-    assert_eq!(parse_plan_choice("1"), Some(PlanChoice::AcceptAgent));
-    assert_eq!(parse_plan_choice("2"), Some(PlanChoice::AcceptYolo));
-    assert_eq!(parse_plan_choice("3"), Some(PlanChoice::RevisePlan));
-    assert_eq!(parse_plan_choice("4"), Some(PlanChoice::ExitPlan));
-}
-
-#[test]
-fn parse_plan_choice_rejects_aliases_and_extra_text() {
-    assert_eq!(parse_plan_choice("accept"), None);
-    assert_eq!(parse_plan_choice("agent"), None);
-    assert_eq!(parse_plan_choice("yolo"), None);
-    assert_eq!(parse_plan_choice("3 revise"), None);
-    assert_eq!(parse_plan_choice("unknown"), None);
-}
-
-#[test]
-fn plan_choice_from_option_maps_expected_values() {
-    assert_eq!(plan_choice_from_option(1), Some(PlanChoice::AcceptAgent));
-    assert_eq!(plan_choice_from_option(2), Some(PlanChoice::AcceptYolo));
-    assert_eq!(plan_choice_from_option(3), Some(PlanChoice::RevisePlan));
-    assert_eq!(plan_choice_from_option(4), Some(PlanChoice::ExitPlan));
-    assert_eq!(plan_choice_from_option(5), None);
-}
-
-#[test]
-fn plan_prompt_view_escape_emits_dismiss_event() {
-    let mut view = PlanPromptView::new(None);
-
-    let action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-
-    assert!(matches!(
-        action,
-        ViewAction::EmitAndClose(ViewEvent::PlanPromptDismissed)
-    ));
-}
-
-#[test]
 fn transcript_scroll_percent_is_clamped_and_relative() {
     assert_eq!(transcript_scroll_percent(0, 20, 120), Some(0));
     assert_eq!(transcript_scroll_percent(50, 20, 120), Some(50));
@@ -10395,42 +10357,6 @@ fn workspace_context_drain_requests_redraw_when_context_changes() {
 }
 
 #[tokio::test]
-async fn dismissed_plan_prompt_leaves_non_numeric_input_for_normal_send_path() {
-    let mut app = create_test_app();
-    app.mode = AppMode::Plan;
-    app.plan_prompt_pending = true;
-    app.offline_mode = true;
-
-    let engine = crate::core::engine::mock_engine_handle();
-    let config = Config::default();
-
-    let handled = handle_plan_choice(&mut app, &config, &engine.handle, "yolo")
-        .await
-        .expect("plan choice");
-
-    assert!(!handled);
-    assert!(!app.plan_prompt_pending);
-    assert_eq!(app.mode, AppMode::Plan);
-
-    let queued = build_queued_message(&mut app, "yolo".to_string());
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("submit normal message");
-
-    assert_eq!(app.queued_message_count(), 1);
-    assert_eq!(
-        app.queued_messages
-            .front()
-            .map(crate::tui::app::QueuedMessage::content),
-        Some("yolo".to_string())
-    );
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("Offline: 1 queued follow-up(s) — ↑ edit last, /queue send <n>")
-    );
-}
-
-#[tokio::test]
 async fn dispatch_user_message_records_prompt_for_cancel_restore() {
     let mut app = create_test_app();
     app.show_thinking = false;
@@ -10768,38 +10694,6 @@ async fn inline_skill_request_keeps_instruction_when_busy_queueing() {
     assert_eq!(
         queued.skill_instruction.as_deref(),
         Some("Use the test skill")
-    );
-}
-
-#[tokio::test]
-async fn numeric_plan_choice_still_queues_follow_up_when_busy() {
-    let mut app = create_test_app();
-    app.mode = AppMode::Plan;
-    app.plan_prompt_pending = true;
-    app.is_loading = true;
-
-    let engine = crate::core::engine::mock_engine_handle();
-    let config = Config::default();
-
-    let handled = handle_plan_choice(&mut app, &config, &engine.handle, "2")
-        .await
-        .expect("plan choice");
-
-    assert!(handled);
-    assert!(!app.plan_prompt_pending);
-    // Plan choice 2 (accept in YOLO) lands in Agent mode + bypass approvals
-    // via the M6 compat shim.
-    assert_eq!(app.mode, AppMode::Agent);
-    assert_eq!(
-        app.approval_mode,
-        crate::tui::approval::ApprovalMode::Bypass
-    );
-    assert_eq!(app.queued_message_count(), 1);
-    assert_eq!(
-        app.queued_messages
-            .front()
-            .map(crate::tui::app::QueuedMessage::content),
-        Some("Proceed with the accepted plan.".to_string())
     );
 }
 
@@ -14715,7 +14609,7 @@ fn turn_inspector_renders_overview_sections_for_active_turn() {
     // Section headers for all nine sections must be present.
     for header in [
         "── Intent ──",
-        "── Strategy / To-do ──",
+        "── To-do ──",
         "── Turn timeline ──",
         "── Files changed ──",
         "── Diagnostics loop ──",
@@ -14888,7 +14782,7 @@ fn turn_inspector_degrades_empty_sections_without_panic() {
     let body = turn_inspector_text(&app);
 
     // Unavailable sections degrade to `none`, never a blank void.
-    assert!(body.contains("── Strategy / To-do ──\nnone"), "{body}");
+    assert!(body.contains("── To-do ──\nnone"), "{body}");
     assert!(body.contains("── Files changed ──\nnone"), "{body}");
     assert!(body.contains("── Tests / verifier ──\nnone"), "{body}");
     assert!(body.contains("── Approvals / denials ──\nnone"), "{body}");
@@ -15038,7 +14932,7 @@ fn turn_handoff_markdown_renders_compact_sections_for_active_turn() {
 #[test]
 fn turn_handoff_markdown_degrades_empty_sections_without_panic() {
     // A minimal turn: only a user prompt. Empty sections must degrade to `—`
-    // (never a heading over a void), and the optional Plan section is omitted.
+    // (never a heading over a void), and the optional To-do section is omitted.
     let mut app = create_test_app();
     app.history = vec![HistoryCell::User {
         content: "hello".to_string(),
@@ -15049,8 +14943,8 @@ fn turn_handoff_markdown_degrades_empty_sections_without_panic() {
 
     assert!(md.contains("## Files changed\n—"), "{md}");
     assert!(md.contains("## Tests / verifier\n—"), "{md}");
-    // The optional plan section is dropped entirely when no plan ran.
-    assert!(!md.contains("## Strategy / To-do"), "{md}");
+    // The optional To-do section is dropped entirely when the list is empty.
+    assert!(!md.contains("## To-do"), "{md}");
     // Intent still resolves; status reflects the live turn.
     assert!(md.contains("## Intent\nhello"), "{md}");
     assert!(md.contains("Status: in progress"), "{md}");
@@ -16561,7 +16455,7 @@ fn checklist_write_renders_dedicated_card() {
         status: ToolStatus::Success,
         input_summary: None,
         output: Some(
-            "Todo list updated (3 items, 33% complete)\n{\"items\":[{\"id\":1,\"content\":\"Plan it out\",\"status\":\"completed\"},{\"id\":2,\"content\":\"Wire the thing\",\"status\":\"in_progress\"},{\"id\":3,\"content\":\"Run gates\",\"status\":\"pending\"}],\"completion_pct\":33,\"in_progress_id\":2}"
+            "Todo list updated (3 items, 33% settled)\n{\"items\":[{\"id\":1,\"content\":\"Plan it out\",\"status\":\"completed\"},{\"id\":2,\"content\":\"Wire the thing\",\"status\":\"in_progress\"},{\"id\":3,\"content\":\"Run gates\",\"status\":\"pending\"}],\"completion_pct\":33,\"in_progress_id\":2}"
                 .to_string(),
         ),
         prompts: None,

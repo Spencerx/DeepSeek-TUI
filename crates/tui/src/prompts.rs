@@ -2048,14 +2048,15 @@ mod tests {
     }
 
     #[test]
-    fn plan_mode_prompt_uses_update_plan_as_confirmation_handoff() {
+    fn plan_mode_prompt_uses_one_progress_surface() {
         assert!(
-            PLAN_MODE.contains("call `update_plan`"),
-            "Plan mode must tell the model to finish plans through update_plan"
+            PLAN_MODE.contains("canonical list in `work_update`"),
+            "Plan mode must keep progress in the canonical list"
         );
+        assert!(!PLAN_MODE.contains("call `update_plan`"));
         assert!(
-            PLAN_MODE.contains("accept, revise, or exit decision"),
-            "Plan mode must explain why update_plan is the UI handoff signal"
+            PLAN_MODE.contains("switch to Act (`/mode act`)"),
+            "Plan mode must use a normal conversational handoff"
         );
     }
 
@@ -2894,7 +2895,6 @@ mod tests {
             "`Run`",
             "`Bash`",
             "work_update",
-            "update_plan",
             "Delegate independent work",
             "Do not announce the mode",
         ] {

@@ -62,8 +62,6 @@ pub mod paste;
 pub mod paste_burst;
 pub mod persistence_actor;
 pub mod phase_strip;
-pub mod plan_prompt;
-pub mod plan_todo_bridge;
 pub mod prompt_suggestion;
 pub mod provider_picker;
 pub mod scrolling;

@@ -845,7 +845,7 @@ pub(crate) fn detail_target_label(app: &App, cell_index: usize) -> Option<String
             explore.entries.len(),
             if explore.entries.len() == 1 { "" } else { "s" }
         )),
-        HistoryCell::Tool(ToolCell::PlanUpdate(_)) => Some("update Strategy".to_string()),
+        HistoryCell::Tool(ToolCell::PlanUpdate(_)) => Some("legacy plan update".to_string()),
         HistoryCell::Tool(ToolCell::PatchSummary(patch)) => Some(format!("patch {}", patch.path)),
         HistoryCell::Tool(ToolCell::Review(review)) => {
             let target = one_line_summary(&review.target, 80);
@@ -997,7 +997,7 @@ pub(super) fn turn_inspector_text(app: &App) -> String {
         push_section(&mut out, "Selected item", vec![line]);
     }
 
-    push_section(&mut out, "Strategy / To-do", turn_plan_lines(app));
+    push_section(&mut out, "To-do", turn_todo_lines(app));
     push_section(
         &mut out,
         "Turn timeline",
@@ -1063,11 +1063,11 @@ pub(crate) fn turn_handoff_markdown(app: &App) -> String {
 
     push_md_section(&mut out, "Intent", vec![turn_intent_line(app, start)]);
 
-    // Strategy / To-do is optional context: include it only when a plan or
-    // To-do tool actually ran, to keep the handoff compact.
-    let plan = turn_plan_lines(app);
-    if !plan.is_empty() {
-        push_md_section(&mut out, "Strategy / To-do", md_bullets(plan));
+    // To-do is optional context: include it only when the canonical list has
+    // items, keeping the handoff compact without recreating a second plan.
+    let todos = turn_todo_lines(app);
+    if !todos.is_empty() {
+        push_md_section(&mut out, "To-do", md_bullets(todos));
     }
 
     push_md_section(
@@ -1178,47 +1178,14 @@ fn selected_item_context_line(app: &App) -> Option<String> {
     Some(format!("{label}{hint}"))
 }
 
-/// Section 2 — Strategy metadata and/or To-do state when those tools ran.
-fn turn_plan_lines(app: &App) -> Vec<String> {
+/// Section 2 — canonical To-do state.
+fn turn_todo_lines(app: &App) -> Vec<String> {
     let mut lines = Vec::new();
-
-    if let Ok(plan) = app.plan_state.try_lock()
-        && !plan.is_empty()
-    {
-        let snapshot = plan.snapshot();
-        let headline = snapshot
-            .title
-            .as_deref()
-            .or(snapshot.objective.as_deref())
-            .map(str::trim)
-            .filter(|s: &&str| !s.is_empty());
-        if let Some(headline) = headline {
-            lines.push(format!(
-                "Strategy: {}",
-                truncate_line_to_width(headline, 64)
-            ));
-        }
-        let (pending, in_progress, completed) = plan.counts();
-        let total = pending + in_progress + completed;
-        if total > 0 {
-            lines.push(format!(
-                "Route steps: {completed}/{total} done ({}%)",
-                plan.progress_percent()
-            ));
-        }
-        for item in &snapshot.items {
-            lines.push(format!(
-                "{} {}",
-                step_status_glyph(&item.status),
-                truncate_line_to_width(&item.step, 72)
-            ));
-        }
-    }
 
     if let Ok(todos) = app.todos.try_lock() {
         let snapshot = todos.snapshot();
         if !snapshot.items.is_empty() {
-            lines.push(format!("To-do: {}% complete", snapshot.completion_pct));
+            lines.push(format!("To-do: {}% settled", snapshot.completion_pct));
             for item in &snapshot.items {
                 lines.push(format!(
                     "{} {}",
@@ -1232,19 +1199,12 @@ fn turn_plan_lines(app: &App) -> Vec<String> {
     lines
 }
 
-fn step_status_glyph(status: &crate::tools::plan::StepStatus) -> &'static str {
-    match status {
-        crate::tools::plan::StepStatus::Completed => "[x]",
-        crate::tools::plan::StepStatus::InProgress => "[~]",
-        crate::tools::plan::StepStatus::Pending => "[ ]",
-    }
-}
-
 fn todo_status_glyph(status: &crate::tools::todo::TodoStatus) -> &'static str {
     match status {
         crate::tools::todo::TodoStatus::Completed => "[x]",
         crate::tools::todo::TodoStatus::InProgress => "[~]",
         crate::tools::todo::TodoStatus::Pending => "[ ]",
+        crate::tools::todo::TodoStatus::Cancelled => "[-]",
     }
 }
 
@@ -1343,7 +1303,7 @@ fn timeline_tool_summary(app: &App, idx: usize, tool: &ToolCell) -> (&'static st
                 if explore.entries.len() == 1 { "" } else { "s" }
             ),
         ),
-        ToolCell::PlanUpdate(_) => ("Strategy", "Strategy metadata updated".to_string()),
+        ToolCell::PlanUpdate(_) => ("legacy plan", "Legacy plan metadata replayed".to_string()),
         ToolCell::PatchSummary(patch) => {
             let summary = one_line_summary(&patch.summary, 72);
             if summary.is_empty() {

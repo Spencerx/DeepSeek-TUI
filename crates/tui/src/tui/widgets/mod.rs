@@ -6215,7 +6215,8 @@ mod tests {
         let mut app = create_test_app();
         app.low_motion = false;
         app.fancy_animations = true;
-        app.plan_prompt_pending = true;
+        app.view_stack
+            .push(crate::tui::views::HelpView::new_for_locale(app.ui_locale));
 
         let widget = ChatWidget::new(&mut app, Rect::new(0, 0, 100, 20));
 

@@ -48,7 +48,7 @@ use crate::route_runtime::{
 };
 use crate::seam_manager::{SeamConfig, SeamManager};
 use crate::tools::goal::{GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state};
-use crate::tools::plan::{PlanSnapshot, SharedPlanState, new_shared_plan_state};
+use crate::tools::plan::{SharedPlanState, new_shared_plan_state};
 use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
 use crate::tools::spec::{
     ApprovalRequirement, ResourceClaim, ToolError, ToolExecutionOutcome, ToolResult,
@@ -100,7 +100,6 @@ struct StructuredState {
     cwd: Option<PathBuf>,
     working_set_summary: Option<String>,
     todo_snapshot: Option<TodoListSnapshot>,
-    plan_snapshot: Option<PlanSnapshot>,
     subagent_snapshots: Vec<SubAgentResult>,
 }
 
@@ -111,7 +110,6 @@ impl StructuredState {
         cwd: Option<PathBuf>,
         working_set: &WorkingSet,
         todos: &SharedTodoList,
-        plan_state: &SharedPlanState,
         subagents: Option<&SharedSubAgentManager>,
     ) -> Self {
         let working_set_summary = working_set.summary_block(&workspace);
@@ -123,15 +121,6 @@ impl StructuredState {
                 None
             } else {
                 Some(snap)
-            }
-        };
-
-        let plan_snapshot = {
-            let guard = plan_state.lock().await;
-            if guard.is_empty() {
-                None
-            } else {
-                Some(guard.snapshot())
             }
         };
 
@@ -153,7 +142,6 @@ impl StructuredState {
             cwd,
             working_set_summary,
             todo_snapshot,
-            plan_snapshot,
             subagent_snapshots,
         }
     }
@@ -168,57 +156,16 @@ impl StructuredState {
             out.push_str(&format!("- Cwd: `{}`\n", cwd.display()));
         }
 
-        if self.todo_snapshot.is_some() || self.plan_snapshot.is_some() {
+        if self.todo_snapshot.is_some() {
             out.push_str("\n### Work\n");
         }
 
         if let Some(todos) = self.todo_snapshot.as_ref() {
-            out.push_str(&format!(
-                "\nChecklist ({}% complete)\n",
-                todos.completion_pct
-            ));
-            for item in &todos.items {
-                let marker = match item.status {
-                    crate::tools::todo::TodoStatus::Pending => "[ ]",
-                    crate::tools::todo::TodoStatus::InProgress => "[~]",
-                    crate::tools::todo::TodoStatus::Completed => "[x]",
-                };
-                out.push_str(&format!("- {marker} {}\n", item.content));
-            }
-        }
-
-        if let Some(plan) = self.plan_snapshot.as_ref() {
-            out.push_str("\nStrategy metadata\n");
-            append_plan_field(&mut out, "Title", plan.title.as_deref());
-            append_plan_field(&mut out, "Objective", plan.objective.as_deref());
-            append_plan_field(&mut out, "Context", plan.context_summary.as_deref());
-            append_plan_field(&mut out, "Explanation", plan.explanation.as_deref());
-            append_plan_list(&mut out, "Source", &plan.sources_used);
-            append_plan_list(&mut out, "Critical file", &plan.critical_files);
-            append_plan_list(&mut out, "Constraint", &plan.constraints);
-            append_plan_field(
-                &mut out,
-                "Recommended approach",
-                plan.recommended_approach.as_deref(),
-            );
-            append_plan_field(
-                &mut out,
-                "Verification plan",
-                plan.verification_plan.as_deref(),
-            );
-            append_plan_field(
-                &mut out,
-                "Risks and unknowns",
-                plan.risks_and_unknowns.as_deref(),
-            );
-            append_plan_field(&mut out, "Handoff packet", plan.handoff_packet.as_deref());
-            for item in &plan.items {
-                let marker = match item.status {
-                    crate::tools::plan::StepStatus::Pending => "[ ]",
-                    crate::tools::plan::StepStatus::InProgress => "[~]",
-                    crate::tools::plan::StepStatus::Completed => "[x]",
-                };
-                out.push_str(&format!("- {marker} {}\n", item.step));
+            out.push_str(&format!("\nTo-do ({}% settled)\n", todos.completion_pct));
+            for line in todos.plain_text().lines() {
+                // IDs are useful in the canonical digest because work_update
+                // addresses later transitions by stable item identity.
+                out.push_str(&format!("- {line}\n"));
             }
         }
 
@@ -264,21 +211,6 @@ fn user_shell_turn_outcome(
         TurnOutcomeStatus::Completed
     } else {
         TurnOutcomeStatus::Failed
-    }
-}
-
-fn append_plan_field(out: &mut String, label: &str, value: Option<&str>) {
-    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
-        out.push_str(&format!("- {label}: {value}\n"));
-    }
-}
-
-fn append_plan_list(out: &mut String, label: &str, values: &[String]) {
-    for value in values {
-        let value = value.trim();
-        if !value.is_empty() {
-            out.push_str(&format!("- {label}: {value}\n"));
-        }
     }
 }
 
@@ -3315,7 +3247,6 @@ impl Engine {
         self.session
             .working_set
             .observe_user_message(&content, &self.session.workspace);
-        let force_update_plan_first = should_force_update_plan_first(input_policy.mode, &content);
 
         // Add user message to session
         let user_msg = self.user_text_message_with_turn_metadata_for_route_and_provenance(
@@ -3390,7 +3321,6 @@ impl Engine {
                 std::env::current_dir().ok(),
                 &self.session.working_set,
                 &self.config.todos,
-                &self.config.plan_state,
                 Some(&self.subagent_manager),
             )
             .await;
@@ -3593,7 +3523,6 @@ impl Engine {
             tool_registry.as_ref(),
             tools,
             input_policy.mode,
-            force_update_plan_first,
             input_policy.dynamic_active_tools,
         ))
         .catch_unwind()
@@ -4081,7 +4010,6 @@ impl Engine {
             &self.session.model,
             self.config.active_route_limits,
         ))
-        .with_review_plan_changes(matches!(mode, AppMode::Plan))
         .with_features(self.config.features.clone())
         .with_shell_manager(self.shell_manager.clone())
         .with_file_read_tracker(self.file_read_tracker.clone())
@@ -5095,8 +5023,7 @@ use self::dispatch::{
     ToolExecutionBatch, ToolExecutionPlan, caller_allowed_for_tool, caller_type_for_tool_use,
     final_tool_input, format_tool_error_with_schema, malformed_tool_arguments_error,
     malformed_tool_arguments_input, mcp_tool_is_parallel_safe, parse_parallel_tool_calls,
-    parse_tool_input, plan_tool_execution_batches, should_force_update_plan_first,
-    should_stop_after_plan_tool, stamp_tool_result_approval,
+    parse_tool_input, plan_tool_execution_batches, stamp_tool_result_approval,
 };
 #[cfg(test)]
 use self::dispatch::{format_tool_error, should_parallelize_tool_batch};

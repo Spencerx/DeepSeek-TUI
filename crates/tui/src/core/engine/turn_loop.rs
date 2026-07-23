@@ -289,7 +289,6 @@ impl Engine {
         tool_registry: Option<&crate::tools::ToolRegistry>,
         tools: Option<Vec<Tool>>,
         mode: AppMode,
-        force_update_plan_first: bool,
         dynamic_active_tools: Vec<&'static str>,
     ) -> (TurnOutcomeStatus, Option<String>) {
         // Only interactive TUI hosts own terminal chrome. Headless exec,
@@ -532,15 +531,10 @@ impl Engine {
             self.layered_context_checkpoint().await;
 
             // Build the request
-            let force_update_plan_this_step = force_update_plan_first && !turn.has_tool_calls();
             let mut active_tools = if tool_catalog.is_empty() {
                 None
             } else {
-                Some(active_tools_for_step(
-                    &tool_catalog,
-                    &active_tool_names,
-                    force_update_plan_this_step,
-                ))
+                Some(active_tools_for_step(&tool_catalog, &active_tool_names))
             };
             if self.config.strict_tool_mode
                 && let Some(tools) = active_tools.as_mut()
@@ -2779,7 +2773,6 @@ impl Engine {
             let mut step_error_categories: Vec<ErrorCategory> = Vec::new();
             let mut step_error_tool_names: Vec<String> = Vec::new();
             let mut step_error_tool_inputs: Vec<serde_json::Value> = Vec::new();
-            let mut stop_after_plan_tool = false;
             // #dogfood 0.8.67: if the model mutates the goal mid-turn via
             // create_goal/update_goal, push the change to the sidebar right after
             // this tool batch instead of waiting for turn end — otherwise the
@@ -2835,9 +2828,6 @@ impl Engine {
                 if matches!(outcome.name.as_str(), "create_goal" | "update_goal") {
                     goal_tool_ran = true;
                 }
-                let should_stop_this_turn =
-                    should_stop_after_plan_tool(mode, &outcome.name, &result);
-
                 match result {
                     Ok(output) => {
                         emit_tool_audit(json!({
@@ -2950,9 +2940,6 @@ impl Engine {
                         .await;
                     }
                 }
-
-                turn.record_tool_call();
-                stop_after_plan_tool |= should_stop_this_turn;
             }
 
             // Reflect a mid-turn goal change on the sidebar immediately (idempotent:
@@ -2987,10 +2974,6 @@ impl Engine {
                     let _ = self.tx_event.send(Event::status(reason)).await;
                     return (TurnOutcomeStatus::Failed, Some(reason.to_string()));
                 }
-            }
-
-            if stop_after_plan_tool {
-                break;
             }
 
             if !pending_steers.is_empty() {

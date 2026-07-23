@@ -1797,7 +1797,7 @@ fn clear_todos_resets_plan_state() {
             }],
             ..UpdatePlanArgs::default()
         });
-        assert!(!plan.is_empty());
+        assert!(!plan.snapshot().is_empty());
     }
 
     assert!(app.clear_todos());
@@ -1806,7 +1806,7 @@ fn clear_todos_resets_plan_state() {
         .plan_state
         .try_lock()
         .expect("plan lock should be available");
-    assert!(plan.is_empty());
+    assert!(plan.snapshot().is_empty());
 }
 
 #[test]

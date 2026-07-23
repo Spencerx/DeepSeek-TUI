@@ -2264,7 +2264,7 @@ pub struct App {
     /// Current hover tooltip text, if any.
     pub sidebar_hover_tooltip: Option<String>,
     /// Last successfully rendered Work panel summary. Transient mutex misses
-    /// should not wipe completed checklist/strategy state from the sidebar.
+    /// should not wipe settled To-do state from the sidebar.
     pub(crate) cached_work_summary: Option<SidebarWorkSummary>,
     /// Browsing context from the last dismissed `/model` picker, so reopening
     /// restores the view mode and highlighted row instead of resetting to the
@@ -2449,15 +2449,7 @@ pub struct App {
     pub project_doc: Option<String>,
     /// Plan state for tracking tasks
     pub plan_state: SharedPlanState,
-    /// Whether a plan follow-up prompt is waiting for user input
-    pub plan_prompt_pending: bool,
-    /// Exact graph proposal rendered in the current Plan confirmation. Plan
-    /// acceptance must present this identity again or fail closed.
-    pub pending_plan_proposal_id: Option<crate::work_graph::ProposalId>,
-    /// Whether update_plan was called during the current turn
-    pub plan_tool_used_in_turn: bool,
-    /// Todo list for `TodoWriteTool`. Read by the plan confirmation modal to
-    /// show the active checklist alongside the plan.
+    /// Todo list for the canonical `work_update` progress surface.
     pub todos: SharedTodoList,
     /// Durable runtime services exposed to model-visible task/automation tools.
     pub runtime_services: RuntimeToolServices,
@@ -3674,9 +3666,6 @@ impl App {
                 .unwrap_or_else(crate::config::StatusItem::default_footer),
             project_doc: None,
             plan_state,
-            plan_prompt_pending: false,
-            pending_plan_proposal_id: None,
-            plan_tool_used_in_turn: false,
             todos,
             runtime_services: RuntimeToolServices {
                 shell_manager: Some(shell_manager),
@@ -3945,12 +3934,6 @@ impl App {
             self.trust_mode = policy.trust_mode;
             self.approval_mode = policy.approval_mode;
             self.yolo = matches!(policy.approval_mode, ApprovalMode::Bypass);
-        }
-
-        if mode != AppMode::Plan {
-            self.plan_prompt_pending = false;
-            self.pending_plan_proposal_id = None;
-            self.plan_tool_used_in_turn = false;
         }
 
         // Execute mode change hooks
@@ -4306,7 +4289,6 @@ impl App {
     pub fn attention_hold_active(&self) -> bool {
         !self.view_stack.is_empty()
             || self.pending_user_input_prompt.is_some()
-            || self.plan_prompt_pending
             || self
                 .task_panel
                 .iter()
@@ -7199,7 +7181,6 @@ impl App {
         workspace: &Path,
         state: Option<&SessionWorkState>,
     ) -> Result<(), String> {
-        self.pending_plan_proposal_id = None;
         if let Some(work) = self.runtime_services.work.as_ref() {
             let empty = SessionWorkState::default();
             let state = state.unwrap_or(&empty);
