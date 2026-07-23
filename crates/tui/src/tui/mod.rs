@@ -13,6 +13,7 @@
 
 pub mod active_cell;
 pub(crate) mod agent_details;
+pub mod ambient_life;
 pub mod app;
 pub mod approval;
 pub mod auto_review;
@@ -40,9 +41,12 @@ pub mod file_tree;
 pub mod footer_ui;
 pub mod format_helpers;
 pub mod frame_rate_limiter;
+pub mod git_status;
 pub mod glyphs;
 pub mod history;
+pub mod hot_tail;
 pub mod hotbar;
+pub mod hover_hit;
 pub mod key_actions;
 pub mod key_shortcuts;
 pub mod keybindings;

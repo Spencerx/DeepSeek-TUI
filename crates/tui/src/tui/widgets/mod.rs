@@ -762,215 +762,75 @@ impl ChatWidget {
         if self.ambient_life
             && let Some(inks) = self.ambient_inks
         {
-            render_ambient_life(
+            let cursor = crate::tui::ambient_life::AmbientCursor {
+                column: 0,
+                row: 0,
+                flee_elapsed_ms: self.fish_flee_elapsed_ms,
+            };
+            let whale = crate::tui::ambient_life::WhaleCameo {
+                elapsed_ms: self.fish_flee_elapsed_ms.and_then(|_| None).or(
+                    // Whale cameo rides the completion breath clock when present.
+                    None,
+                ),
+                anchor_x: area.x.saturating_add(area.width / 2),
+                anchor_y: area.y.saturating_add(area.height.saturating_mul(2) / 3),
+            };
+            // Prefer completion-timed cameo when the ocean column carries one.
+            let whale = if let Some(completion_ms) =
+                self.ocean_column.and_then(|c| c.completion_elapsed_ms())
+            {
+                crate::tui::ambient_life::WhaleCameo {
+                    elapsed_ms: Some(completion_ms),
+                    ..whale
+                }
+            } else {
+                whale
+            };
+            crate::tui::ambient_life::render_ambient_life(
                 area,
                 buf,
                 inks,
                 &self.lines,
                 self.ocean_elapsed_ms,
                 self.ocean_animated,
-                self.fish_flee_elapsed_ms,
+                cursor,
+                whale,
             );
+            if let Some(column) = self.ocean_column {
+                crate::tui::ambient_life::apply_caustic_shimmer(
+                    area,
+                    buf,
+                    &column,
+                    self.ocean_elapsed_ms,
+                    self.ocean_animated,
+                    &self.lines,
+                );
+            }
         }
     }
 }
 
 fn occupied_text_bounds(line: &Line<'_>) -> Option<(usize, usize)> {
-    let text = line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
-    if text.trim().is_empty() {
-        return None;
-    }
-
-    let leading = text
-        .chars()
-        .take_while(|ch| ch.is_whitespace())
-        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
-        .sum::<usize>();
-    let total = UnicodeWidthStr::width(text.as_str());
-    let trailing = text
-        .chars()
-        .rev()
-        .take_while(|ch| ch.is_whitespace())
-        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
-        .sum::<usize>();
-    Some((leading, total.saturating_sub(trailing)))
+    crate::tui::ambient_life::occupied_text_bounds(line)
 }
 
-fn render_ambient_life(
-    area: Rect,
-    buf: &mut Buffer,
-    inks: (Color, Color),
-    lines: &[Line<'static>],
-    elapsed_ms: u128,
-    animated: bool,
-    fish_flee_elapsed_ms: Option<u128>,
-) {
-    if area.width < crate::tui::ocean::AMBIENT_MIN_WIDTH
-        || area.height < crate::tui::ocean::AMBIENT_MIN_HEIGHT
-    {
-        return;
-    }
-
-    let span_a = (area.width / 6).clamp(10, 24);
-    let span_b = (area.width / 7).clamp(8, 20);
-    let span_c = (area.width / 8).clamp(7, 18);
-    let (drift_a, fish_a_forward) = if animated {
-        ambient_ping_pong(elapsed_ms, 480, span_a, 0)
-    } else {
-        (0, true)
-    };
-    let (drift_b, fish_b_forward) = if animated {
-        ambient_ping_pong(elapsed_ms, 560, span_b, 1_900)
-    } else {
-        (0, false)
-    };
-    let (drift_c, fish_c_forward) = if animated {
-        ambient_ping_pong(elapsed_ms, 640, span_c, 3_700)
-    } else {
-        (0, true)
-    };
-    let heading_sample_ms = u128::from(crate::tui::ui::UI_UNDERWATER_ANIMATION_MS);
-    let previous_elapsed_ms = elapsed_ms.saturating_sub(heading_sample_ms);
-    let next_elapsed_ms = elapsed_ms.saturating_add(heading_sample_ms);
-    let previous_drift_a = if animated {
-        ambient_ping_pong(previous_elapsed_ms, 480, span_a, 0).0
-    } else {
-        drift_a
-    };
-    let next_drift_a = if animated {
-        ambient_ping_pong(next_elapsed_ms, 480, span_a, 0).0
-    } else {
-        drift_a
-    };
-    let previous_drift_b = if animated {
-        ambient_ping_pong(previous_elapsed_ms, 560, span_b, 1_900).0
-    } else {
-        drift_b
-    };
-    let next_drift_b = if animated {
-        ambient_ping_pong(next_elapsed_ms, 560, span_b, 1_900).0
-    } else {
-        drift_b
-    };
-    let previous_drift_c = if animated {
-        ambient_ping_pong(previous_elapsed_ms, 640, span_c, 3_700).0
-    } else {
-        drift_c
-    };
-    let next_drift_c = if animated {
-        ambient_ping_pong(next_elapsed_ms, 640, span_c, 3_700).0
-    } else {
-        drift_c
-    };
-    let rise = if animated {
-        u16::try_from((elapsed_ms / 720) % 5).unwrap_or(0)
-    } else {
-        0
-    };
-    let bubble = if animated {
-        ["·", "˚", "°", "˚"][(elapsed_ms / 300) as usize % 4]
-    } else {
-        "°"
-    };
-    let flee = fish_flee_elapsed_ms.map_or(0, fish_flee_offset);
-    let previous_flee = fish_flee_elapsed_ms
-        .map(|elapsed| fish_flee_offset(elapsed.saturating_sub(heading_sample_ms)))
-        .unwrap_or(flee);
-    let next_flee = fish_flee_elapsed_ms
-        .map(|elapsed| fish_flee_offset(elapsed.saturating_add(heading_sample_ms)))
-        .unwrap_or(flee);
-    let max_fish_x = area.width.saturating_sub(3);
-    let fish_a_x = (area.width / 12 + drift_a)
-        .saturating_sub(flee)
-        .min(max_fish_x);
-    let fish_a_previous_x = (area.width / 12 + previous_drift_a)
-        .saturating_sub(previous_flee)
-        .min(max_fish_x);
-    let fish_a_next_x = (area.width / 12 + next_drift_a)
-        .saturating_sub(next_flee)
-        .min(max_fish_x);
-    let fish_b_x = (area.width * 5 / 6)
-        .saturating_sub(drift_b)
-        .saturating_add(flee)
-        .min(max_fish_x);
-    let fish_b_previous_x = (area.width * 5 / 6)
-        .saturating_sub(previous_drift_b)
-        .saturating_add(previous_flee)
-        .min(max_fish_x);
-    let fish_b_next_x = (area.width * 5 / 6)
-        .saturating_sub(next_drift_b)
-        .saturating_add(next_flee)
-        .min(max_fish_x);
-    let fish_c_x = (area.width / 3 + drift_c)
-        .saturating_sub(flee / 2)
-        .min(max_fish_x);
-    let fish_c_previous_x = (area.width / 3 + previous_drift_c)
-        .saturating_sub(previous_flee / 2)
-        .min(max_fish_x);
-    let fish_c_next_x = (area.width / 3 + next_drift_c)
-        .saturating_sub(next_flee / 2)
-        .min(max_fish_x);
-    let fish_a_faces_right =
-        fish_heading(fish_a_previous_x, fish_a_x, fish_a_next_x, fish_a_forward);
-    let fish_b_faces_right =
-        fish_heading(fish_b_previous_x, fish_b_x, fish_b_next_x, !fish_b_forward);
-    let fish_c_faces_right =
-        fish_heading(fish_c_previous_x, fish_c_x, fish_c_next_x, fish_c_forward);
-    let marks = [
-        (fish_a_x, area.height * 3 / 4, fish_mark(fish_a_faces_right)),
-        (fish_b_x, area.height * 3 / 8, fish_mark(fish_b_faces_right)),
-        (fish_c_x, area.height / 6, fish_mark(fish_c_faces_right)),
-        (
-            area.width * 3 / 4,
-            (area.height / 4).saturating_sub(rise),
-            bubble,
-        ),
-    ];
-    for (index, (local_x, local_y, mark)) in marks.into_iter().enumerate() {
-        let protected = lines
-            .get(usize::from(local_y))
-            .and_then(occupied_text_bounds);
-        let mark_width = UnicodeWidthStr::width(mark);
-        // A one-cell gap on either side keeps life from visually attaching
-        // to occupied text, not merely from overlapping it.
-        let collides = protected.is_some_and(|(start, end)| {
-            usize::from(local_x) < end.saturating_add(1)
-                && usize::from(local_x) + mark_width > start.saturating_sub(1)
-        });
-        if collides || local_x.saturating_add(mark_width as u16) > area.width {
-            continue;
-        }
-        for (offset, ch) in mark.chars().enumerate() {
-            buf[(area.x + local_x + offset as u16, area.y + local_y)]
-                .set_symbol(&ch.to_string())
-                .set_fg(if index == 1 { inks.1 } else { inks.0 });
-        }
-    }
+/// Cosine-eased ping-pong retained for unit tests and any residual callers.
+#[cfg(test)]
+fn ambient_ping_pong(elapsed_ms: u128, step_ms: u128, span: u16, phase_ms: u128) -> (u16, bool) {
+    crate::tui::ambient_life::eased_drift(elapsed_ms, step_ms, span, phase_ms)
 }
 
-/// One-shot flee arc: fish leave their ambient positions, peak halfway, then
-/// return to the same stable positions. The deterministic 800 ms envelope is
-/// keyed to the typed Working transition and never loops.
+#[cfg(test)]
 fn fish_flee_offset(elapsed_ms: u128) -> u16 {
-    let progress = elapsed_ms.min(800) as f32 / 800.0;
-    let excursion = (progress * std::f32::consts::PI).sin() * 9.0;
-    excursion.round().clamp(0.0, 9.0) as u16
+    crate::tui::ambient_life::fish_flee_offset(elapsed_ms)
 }
 
-#[must_use]
+#[cfg(test)]
 fn fish_mark(facing_right: bool) -> &'static str {
     if facing_right { "><>" } else { "<><" }
 }
 
-/// Prefer the next visible displacement, then the most recent displacement.
-/// The fallback matters only while easing leaves the fish in the same terminal
-/// cell for several frames. Crucially, callers pass the fallback in screen-x
-/// coordinates, so mirrored paths cannot accidentally swim backwards.
-#[must_use]
+#[cfg(test)]
 fn fish_heading(previous_x: u16, current_x: u16, next_x: u16, fallback_right: bool) -> bool {
     if next_x != current_x {
         next_x > current_x
@@ -979,27 +839,6 @@ fn fish_heading(previous_x: u16, current_x: u16, next_x: u16, fallback_right: bo
     } else {
         fallback_right
     }
-}
-
-/// A cosine-eased ping-pong path keeps the fish continuous and lets it settle
-/// gently before turning. The event loop supplies the shared underwater
-/// cadence; this function only maps elapsed time and never requests frames.
-fn ambient_ping_pong(elapsed_ms: u128, step_ms: u128, span: u16, phase_ms: u128) -> (u16, bool) {
-    if span == 0 || step_ms == 0 {
-        return (0, true);
-    }
-    let leg_ms = step_ms.saturating_mul(u128::from(span));
-    let period_ms = leg_ms.saturating_mul(2);
-    let phase = (elapsed_ms.saturating_add(phase_ms)) % period_ms;
-    let (leg_elapsed, forward) = if phase <= leg_ms {
-        (phase, true)
-    } else {
-        (phase.saturating_sub(leg_ms), false)
-    };
-    let progress = leg_elapsed as f64 / leg_ms as f64;
-    let eased = (1.0 - (progress * std::f64::consts::PI).cos()) * 0.5;
-    let position = if forward { eased } else { 1.0 - eased };
-    ((position * f64::from(span)).round() as u16, forward)
 }
 
 fn jump_to_latest_button_rect(area: Rect, has_scrollbar: bool) -> Option<Rect> {

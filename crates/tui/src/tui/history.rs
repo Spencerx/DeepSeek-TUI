@@ -348,7 +348,7 @@ impl HistoryCell {
             HistoryCell::Tool(cell) => cell.lines_with_motion(width, options.low_motion),
             HistoryCell::User { content } => render_user_message(content, width),
             HistoryCell::Assistant { content, streaming } => {
-                render_message_with_copy_metadata_for_palette(
+                let mut lines: Vec<Line<'static>> = render_message_with_copy_metadata_for_palette(
                     ASSISTANT_GLYPH,
                     assistant_label_style_for(*streaming, options.low_motion),
                     message_body_style(),
@@ -358,7 +358,11 @@ impl HistoryCell {
                 )
                 .into_iter()
                 .map(|rendered| rendered.line)
-                .collect()
+                .collect();
+                if *streaming {
+                    apply_hot_tail_to_last_line(&mut lines, options.low_motion);
+                }
+                lines
             }
             HistoryCell::System { .. } | HistoryCell::Error { .. } => self.lines(width),
             HistoryCell::SubAgent(cell) => cell.lines(width),
@@ -401,14 +405,18 @@ impl HistoryCell {
                 hard_break_copy_lines(render_user_message(content, width))
             }
             HistoryCell::Assistant { content, streaming } => {
-                render_message_with_copy_metadata_for_palette(
+                let mut rendered = render_message_with_copy_metadata_for_palette(
                     ASSISTANT_GLYPH,
                     assistant_label_style_for(*streaming, options.low_motion),
                     message_body_style(),
                     content,
                     width,
                     options.palette_mode,
-                )
+                );
+                if *streaming && let Some(last) = rendered.last_mut() {
+                    apply_hot_tail_to_line(&mut last.line, options.low_motion);
+                }
+                rendered
             }
             HistoryCell::System { content } if !is_cycle_boundary(content) => {
                 render_message_with_copy_metadata_for_palette(
@@ -2548,6 +2556,65 @@ impl FileActivitySummary {
             FileActivityKind::Write => self.files_written += 1,
         }
     }
+}
+
+/// Illuminate the newest graphemes of an actively streaming assistant line.
+fn apply_hot_tail_to_last_line(lines: &mut [Line<'static>], low_motion: bool) {
+    if let Some(last) = lines.last_mut() {
+        apply_hot_tail_to_line(last, low_motion);
+    }
+}
+
+fn apply_hot_tail_to_line(line: &mut Line<'static>, low_motion: bool) {
+    if line.spans.is_empty() {
+        return;
+    }
+    // Reconstruct plain text from spans, split hot tail, re-style.
+    let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    if plain.trim().is_empty() {
+        return;
+    }
+    let (_settled, hot) = crate::tui::hot_tail::split_hot_tail(
+        &plain,
+        true,
+        crate::tui::hot_tail::HOT_TAIL_GRAPHEMES,
+    );
+    if hot.is_empty() {
+        return;
+    }
+    let hot_start = plain.len().saturating_sub(hot.len());
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let base_fg = palette::TEXT_PRIMARY;
+    let hot_style = crate::tui::hot_tail::hot_tail_style(base_fg, elapsed, low_motion);
+
+    // Walk spans and re-style the trailing hot graphemes.
+    let mut cursor = 0usize;
+    let mut new_spans = Vec::with_capacity(line.spans.len() + 2);
+    for span in line.spans.drain(..) {
+        let content = span.content.to_string();
+        let len = content.len();
+        let span_end = cursor + len;
+        if span_end <= hot_start {
+            new_spans.push(span);
+        } else if cursor >= hot_start {
+            new_spans.push(Span::styled(content, hot_style));
+        } else {
+            // Split this span across the boundary.
+            let local = hot_start - cursor;
+            let (left, right) = content.split_at(local.min(content.len()));
+            if !left.is_empty() {
+                new_spans.push(Span::styled(left.to_string(), span.style));
+            }
+            if !right.is_empty() {
+                new_spans.push(Span::styled(right.to_string(), hot_style));
+            }
+        }
+        cursor = span_end;
+    }
+    line.spans = new_spans;
 }
 
 #[cfg(test)]
