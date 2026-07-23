@@ -17723,6 +17723,22 @@ fn status_animation_stays_idle_without_live_motion() {
         !should_tick_status_animation(&app, false, false, false, false),
         "idle sessions should not wake the animation timer"
     );
+
+    // Exercise the actual coalescing counter over a representative settled
+    // interval. A regression that starts requesting ambient frames will make
+    // this counter non-zero even if individual widgets still look static.
+    let policy = crate::tui::motion::MotionPolicy::from_settings(false, true, false);
+    let mut requester = FrameRequester::new();
+    let started = Instant::now();
+    for tick in 0..=50 {
+        let now = started + Duration::from_millis(tick * 100);
+        if should_tick_status_animation(&app, false, false, false, false) {
+            requester.request_frame(now, policy);
+        }
+        let _ = requester.take_due(now, policy);
+    }
+    assert_eq!(requester.request_count(), 0, "settled TUI requested frames");
+    assert_eq!(requester.emit_count(), 0, "settled TUI emitted frames");
 }
 
 #[test]
