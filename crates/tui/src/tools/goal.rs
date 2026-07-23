@@ -23,6 +23,10 @@ use crate::tools::spec::{
 /// own conservative circuit breaker; see `goal_loop::decide_continuation`.
 pub const MAX_GOAL_CONTINUATIONS_PER_TURN: u32 = 3;
 
+/// Identical critical verifier gap sets required before automatic
+/// continuation pauses for inspection.
+pub const NO_PROGRESS_STALL_THRESHOLD: u32 = 3;
+
 /// Shared reference to the current runtime goal.
 pub type SharedGoalState = Arc<Mutex<GoalState>>;
 
@@ -71,6 +75,7 @@ impl GoalStatus {
 pub enum GoalPauseReason {
     User,
     Backoff,
+    NoProgress,
     UsageLimit,
     BudgetLimit,
 }
@@ -101,6 +106,7 @@ impl GoalPauseReason {
         match self {
             Self::User => "user",
             Self::Backoff => "run limit",
+            Self::NoProgress => "no progress",
             Self::UsageLimit => "usage limit",
             Self::BudgetLimit => "budget limit",
         }
@@ -124,6 +130,8 @@ pub struct GoalState {
     pause_reason: Option<GoalPauseReason>,
     completion_verification: Option<GoalCompletionVerification>,
     advisories: Vec<GoalAdvisoryNote>,
+    last_gap_fingerprint: Option<String>,
+    repeated_gap_count: u32,
 }
 
 impl GoalState {
@@ -170,6 +178,8 @@ impl GoalState {
                     self.pause_reason = None;
                     self.completion_verification = None;
                     self.advisories.clear();
+                    self.last_gap_fingerprint = None;
+                    self.repeated_gap_count = 0;
                 } else if self.token_budget != token_budget {
                     self.token_budget = token_budget;
                 }
@@ -179,6 +189,8 @@ impl GoalState {
                     self.blocker = None;
                     self.pause_reason = None;
                     self.completion_verification = None;
+                    self.last_gap_fingerprint = None;
+                    self.repeated_gap_count = 0;
                 }
 
                 if changed || status_changed || self.status.is_none() {
@@ -222,6 +234,8 @@ impl GoalState {
         self.pause_reason = None;
         self.completion_verification = None;
         self.advisories.clear();
+        self.last_gap_fingerprint = None;
+        self.repeated_gap_count = 0;
         Ok(())
     }
 
@@ -274,6 +288,38 @@ impl GoalState {
             self.advisories.remove(0);
         }
         self.advisories.push(GoalAdvisoryNote { summary });
+        Ok(())
+    }
+
+    pub fn record_not_achieved(
+        &mut self,
+        verification: GoalProgressVerification,
+    ) -> Result<(), &'static str> {
+        if !self.is_active() {
+            return Err("Verifier progress requires an active goal.");
+        }
+        if verification.role == GoalReviewRole::Advisory {
+            return self
+                .record_advisory(format!("{}: {}", verification.check, verification.summary));
+        }
+
+        let fingerprint = gap_fingerprint(&verification.gaps)
+            .ok_or("Critical not-achieved verification requires at least one concrete gap.")?;
+        self.repeated_gap_count = if self.last_gap_fingerprint.as_deref() == Some(&fingerprint) {
+            self.repeated_gap_count.saturating_add(1)
+        } else {
+            1
+        };
+        self.last_gap_fingerprint = Some(fingerprint);
+
+        if self.repeated_gap_count >= NO_PROGRESS_STALL_THRESHOLD {
+            self.status = Some(GoalStatus::Paused);
+            self.finished_at = Some(Instant::now());
+            self.pause_reason = Some(GoalPauseReason::NoProgress);
+            self.evidence = None;
+            self.blocker = None;
+            self.completion_verification = None;
+        }
         Ok(())
     }
 
@@ -335,6 +381,8 @@ impl GoalState {
             pause_reason: self.pause_reason,
             completion_verification: self.completion_verification.clone(),
             advisories: self.advisories.clone(),
+            last_gap_fingerprint: self.last_gap_fingerprint.clone(),
+            repeated_gap_count: self.repeated_gap_count,
         }
     }
 }
@@ -354,6 +402,8 @@ pub struct GoalSnapshot {
     pub pause_reason: Option<GoalPauseReason>,
     pub completion_verification: Option<GoalCompletionVerification>,
     pub advisories: Vec<GoalAdvisoryNote>,
+    pub last_gap_fingerprint: Option<String>,
+    pub repeated_gap_count: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -365,6 +415,17 @@ pub struct GoalCompletionVerification {
     pub role: GoalReviewRole,
     #[serde(default)]
     pub contract_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GoalProgressVerification {
+    pub status: String,
+    pub check: String,
+    pub summary: String,
+    #[serde(default)]
+    pub role: GoalReviewRole,
+    #[serde(default)]
+    pub gaps: Vec<String>,
 }
 
 fn completion_contract_fingerprint(
@@ -386,6 +447,38 @@ fn completion_contract_fingerprint(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn gap_fingerprint(gaps: &[String]) -> Option<String> {
+    let mut normalized = gaps
+        .iter()
+        .map(|gap| {
+            gap.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        })
+        .filter(|gap| !gap.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort_unstable();
+    normalized.dedup();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"codewhale-goal-gaps-v1\0");
+    for gap in normalized {
+        hasher.update(gap.as_bytes());
+        hasher.update([0]);
+    }
+    Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
 }
 
 impl GoalSnapshot {
@@ -412,6 +505,8 @@ impl GoalSnapshot {
             pause_reason,
             completion_verification: None,
             advisories: Vec::new(),
+            last_gap_fingerprint: None,
+            repeated_gap_count: 0,
         }
     }
 }
@@ -443,7 +538,7 @@ pub fn thread_goal_status_projection(
 pub fn render_continuation_prompt(snapshot: &GoalSnapshot, continuation_index: u32) -> String {
     let goal_json = serde_json::to_string_pretty(snapshot).unwrap_or_else(|_| "{}".to_string());
     format!(
-        "{}\n\n## Active Goal State\n\n```json\n{}\n```\n\nContinuation pass #{}.\nIf the goal is complete, first run or cite a concrete verifier/check when one applies, then call `update_goal` with `status: \"complete\"`, concrete evidence, and `verification: {{\"status\":\"passed\",\"check\":\"...\",\"summary\":\"...\"}}`. For non-verifiable work (docs, research, writing), use `verification: {{\"status\":\"not_applicable\",\"check\":\"...\",\"summary\":\"...\"}}` with a clear rationale instead of fabricating a verifier receipt. If it is blocked, call `update_goal` with `status: \"blocked\"` and the blocker. Otherwise continue making progress toward the objective.",
+        "{}\n\n## Active Goal State\n\n```json\n{}\n```\n\nContinuation pass #{}.\nIf a critical verifier finds remaining work, call `update_goal` with `status: \"not_achieved\"` and its concrete `verification.gaps`; repeated equivalent gap sets pause the loop for inspection instead of spending indefinitely. If the goal is complete, first run or cite a concrete verifier/check when one applies, then call `update_goal` with `status: \"complete\"`, concrete evidence, and `verification: {{\"status\":\"passed\",\"check\":\"...\",\"summary\":\"...\"}}`. For non-verifiable work (docs, research, writing), use `verification: {{\"status\":\"not_applicable\",\"check\":\"...\",\"summary\":\"...\"}}` with a clear rationale instead of fabricating a verifier receipt. If it is blocked, call `update_goal` with `status: \"blocked\"` and the blocker. Otherwise continue making progress toward the objective.",
         crate::prompts::GOAL_CONTINUATION_PROMPT.trim(),
         goal_json,
         continuation_index,
@@ -505,6 +600,30 @@ fn parse_completion_verification(input: &Value) -> Result<GoalCompletionVerifica
         role: verification.role,
         contract_fingerprint: String::new(),
     })
+}
+
+fn parse_progress_verification(input: &Value) -> Result<GoalProgressVerification, ToolError> {
+    let Some(raw) = input.get("verification") else {
+        return Err(ToolError::invalid_input(
+            "verification is required when status is not_achieved",
+        ));
+    };
+    let mut verification: GoalProgressVerification = serde_json::from_value(raw.clone())
+        .map_err(|err| ToolError::invalid_input(format!("invalid verification: {err}")))?;
+    if verification.status.trim() != "not_achieved" {
+        return Err(ToolError::invalid_input(
+            "verification.status must be 'not_achieved' for progress review",
+        ));
+    }
+    verification.check = verification.check.trim().to_string();
+    verification.summary = verification.summary.trim().to_string();
+    if verification.check.is_empty() {
+        return Err(ToolError::invalid_input("verification.check is required"));
+    }
+    if verification.summary.is_empty() {
+        return Err(ToolError::invalid_input("verification.summary is required"));
+    }
+    Ok(verification)
 }
 
 fn json_result(snapshot: &GoalSnapshot) -> Result<ToolResult, ToolError> {
@@ -667,8 +786,8 @@ impl ToolSpec for UpdateGoalTool {
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["complete", "blocked", "advisory"],
-                    "description": "Use complete only when a critical verifier proves the goal; blocked when meaningful progress cannot continue; advisory to append best-effort context without changing lifecycle state."
+                    "enum": ["complete", "blocked", "not_achieved", "advisory"],
+                    "description": "Use complete only when a critical verifier proves the goal; not_achieved to record verifier gaps; blocked when meaningful progress cannot continue; advisory to append best-effort context without changing lifecycle state."
                 },
                 "evidence": {
                     "type": "string",
@@ -676,12 +795,12 @@ impl ToolSpec for UpdateGoalTool {
                 },
                 "verification": {
                     "type": "object",
-                    "description": "Required when status is complete. A verifier-as-judge receipt from a concrete check, such as run_verifiers or an equivalent project-specific gate.",
+                    "description": "Required when status is complete or not_achieved. A verifier-as-judge receipt from a concrete check, such as run_verifiers or an equivalent project-specific gate.",
                     "properties": {
                         "status": {
                             "type": "string",
-                            "enum": ["passed", "not_applicable"],
-                            "description": "Use passed when a concrete verifier/check succeeded; not_applicable when no automated verifier applies."
+                            "enum": ["passed", "not_applicable", "not_achieved"],
+                            "description": "Use passed when a concrete verifier/check succeeded; not_applicable when no automated verifier applies; not_achieved when the verifier found concrete remaining gaps."
                         },
                         "check": {
                             "type": "string",
@@ -695,6 +814,11 @@ impl ToolSpec for UpdateGoalTool {
                             "type": "string",
                             "enum": ["critical", "advisory"],
                             "description": "Critical reviews may satisfy the judged completion contract. Advisory reviews are fail-open and cannot complete it. Defaults to critical for compatibility."
+                        },
+                        "gaps": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Concrete remaining gaps. Required for critical not_achieved reviews; order and duplicate wording do not affect the stall fingerprint."
                         }
                     },
                     "required": ["status", "check", "summary"],
@@ -765,6 +889,12 @@ impl ToolSpec for UpdateGoalTool {
                         .mark_blocked(blocker)
                         .map_err(ToolError::invalid_input)?;
                 }
+                "not_achieved" => {
+                    let verification = parse_progress_verification(&input)?;
+                    state
+                        .record_not_achieved(verification)
+                        .map_err(ToolError::invalid_input)?;
+                }
                 "advisory" => {
                     let advisory = input
                         .get("advisory")
@@ -783,7 +913,7 @@ impl ToolSpec for UpdateGoalTool {
                 }
                 other => {
                     return Err(ToolError::invalid_input(format!(
-                        "unsupported goal status '{other}'; update_goal can only mark complete or blocked, or append advisory context"
+                        "unsupported goal status '{other}'; update_goal can only mark complete or blocked, record not_achieved verifier gaps, or append advisory context"
                     )));
                 }
             }
@@ -1187,6 +1317,131 @@ mod tests {
             .expect_err("sealed contract must be immutable");
         assert!(err.contains("already sealed"));
         assert_eq!(state.snapshot(), sealed);
+    }
+
+    fn not_achieved_review(role: GoalReviewRole, gaps: &[&str]) -> GoalProgressVerification {
+        GoalProgressVerification {
+            status: "not_achieved".to_string(),
+            check: "critical verifier".to_string(),
+            summary: "remaining work found".to_string(),
+            role,
+            gaps: gaps.iter().map(|gap| (*gap).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn equivalent_gap_sets_have_one_stable_fingerprint() {
+        let first = gap_fingerprint(&[
+            "  Add   a regression test ".to_string(),
+            "Fix provider copy".to_string(),
+        ]);
+        let reordered = gap_fingerprint(&[
+            "fix PROVIDER copy".to_string(),
+            "add a regression test".to_string(),
+            "Add a regression test".to_string(),
+        ]);
+        assert_eq!(first, reordered);
+        assert_eq!(first.expect("fingerprint").len(), 64);
+    }
+
+    #[test]
+    fn three_identical_critical_gap_sets_pause_for_no_progress() {
+        let mut state = GoalState::default();
+        state
+            .create("finish the release candidate".to_string(), None)
+            .expect("create goal");
+
+        for expected_count in 1..=NO_PROGRESS_STALL_THRESHOLD {
+            state
+                .record_not_achieved(not_achieved_review(
+                    GoalReviewRole::Critical,
+                    &[
+                        "add the missing compatibility test",
+                        "fix the final warning",
+                    ],
+                ))
+                .expect("record verifier gaps");
+            assert_eq!(state.snapshot().repeated_gap_count, expected_count);
+        }
+
+        let stalled = state.snapshot();
+        assert_eq!(stalled.status, "paused");
+        assert_eq!(stalled.pause_reason, Some(GoalPauseReason::NoProgress));
+        assert!(stalled.last_gap_fingerprint.is_some());
+    }
+
+    #[test]
+    fn changed_gaps_reset_stall_counter_and_advice_never_advances_it() {
+        let mut state = GoalState::default();
+        state
+            .create("keep making measurable progress".to_string(), None)
+            .expect("create goal");
+        state
+            .record_not_achieved(not_achieved_review(
+                GoalReviewRole::Critical,
+                &["first gap"],
+            ))
+            .expect("first critical review");
+        state
+            .record_not_achieved(not_achieved_review(
+                GoalReviewRole::Critical,
+                &["first gap"],
+            ))
+            .expect("repeat critical review");
+        assert_eq!(state.snapshot().repeated_gap_count, 2);
+
+        state
+            .record_not_achieved(not_achieved_review(
+                GoalReviewRole::Advisory,
+                &["advisor-only concern"],
+            ))
+            .expect("advisory review is fail-open");
+        let after_advice = state.snapshot();
+        assert_eq!(after_advice.repeated_gap_count, 2);
+        assert_eq!(after_advice.advisories.len(), 1);
+        assert_eq!(after_advice.status, "active");
+
+        state
+            .record_not_achieved(not_achieved_review(
+                GoalReviewRole::Critical,
+                &["a different remaining gap"],
+            ))
+            .expect("changed critical review");
+        let progressed = state.snapshot();
+        assert_eq!(progressed.repeated_gap_count, 1);
+        assert_eq!(progressed.status, "active");
+    }
+
+    #[tokio::test]
+    async fn update_goal_not_achieved_receipts_pause_after_threshold() {
+        let state = new_shared_goal_state_from_host_status(
+            Some("close every verifier gap".to_string()),
+            None,
+            GoalStatus::Active,
+        );
+        let update = UpdateGoalTool::new(state.clone());
+        for _ in 0..NO_PROGRESS_STALL_THRESHOLD {
+            update
+                .execute(
+                    json!({
+                        "status": "not_achieved",
+                        "verification": {
+                            "status": "not_achieved",
+                            "check": "cargo test",
+                            "summary": "the same regression remains",
+                            "role": "critical",
+                            "gaps": ["fix the failing regression"]
+                        }
+                    }),
+                    &ToolContext::new("."),
+                )
+                .await
+                .expect("record not-achieved receipt");
+        }
+
+        let snapshot = state.lock().expect("goal lock").snapshot();
+        assert_eq!(snapshot.status, "paused");
+        assert_eq!(snapshot.pause_reason, Some(GoalPauseReason::NoProgress));
     }
 
     #[tokio::test]
