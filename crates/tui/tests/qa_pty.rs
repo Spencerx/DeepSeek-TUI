@@ -1045,11 +1045,21 @@ fn work_surface_real_rows_own_click_wheel_and_resize() -> anyhow::Result<()> {
         .find_text("todo-mouse-00")
         .expect("real rendered first To-do row");
 
-    // The default top Work surface is three rows tall: one pinned progress
-    // receipt, one selectable row, and the visible divider. Send genuine SGR
-    // down/drag/up bytes and prove the resized surface exposes additional real
-    // rows before exercising scroll.
-    let divider_row = first_row.saturating_add(1);
+    // The top Work surface auto-fits its row count to the plan (capped), so
+    // the divider is not a fixed offset from the first selectable row — find
+    // the rendered horizontal rule itself. Send genuine SGR down/drag/up
+    // bytes and prove the resized surface exposes additional real rows
+    // before exercising scroll.
+    let divider_row = (first_row..first_row.saturating_add(20))
+        .find(|&y| {
+            h.frame()
+                .row(y)
+                .chars()
+                .filter(|&c| c == '─' || c == '━')
+                .count()
+                >= 20
+        })
+        .expect("rendered divider row below the to-do rows");
     h.send(keys::mouse::down(divider_row, first_col))?;
     h.send(keys::mouse::drag(divider_row.saturating_add(4), first_col))?;
     h.send(keys::mouse::up(divider_row.saturating_add(4), first_col))?;
